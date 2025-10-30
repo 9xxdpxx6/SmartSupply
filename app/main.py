@@ -161,6 +161,11 @@ async def predict_data(request: PredictRequest):
         raise HTTPException(status_code=500, detail=f"Error during prediction: {str(e)}")
 
 
+from fastapi.responses import FileResponse
+import tempfile
+import uuid
+
+
 @app.get("/forecast/download")
 async def download_forecast_pdf(path: str = Query(..., description="Path to the forecast CSV file")):
     """Download a forecast report as PDF."""
@@ -187,23 +192,20 @@ async def download_forecast_pdf(path: str = Query(..., description="Path to the 
             'mape': 'N/A'
         }
         
-        # Generate a temporary PDF path
+        # Generate a PDF path using a temporary file
         pdf_path = path.replace('.csv', '_report.pdf')
         
         # Generate the PDF report
         export_report_pdf(pdf_path, df_history, df_forecast, metrics)
         
-        # Read the PDF file and return as bytes
-        with open(pdf_path, "rb") as pdf_file:
-            pdf_content = pdf_file.read()
-        
         logger.info(f"PDF report generated: {pdf_path}")
         
-        return {
-            "filename": os.path.basename(pdf_path),
-            "content_type": "application/pdf",
-            "content": pdf_content
-        }
+        # Return the PDF file as a download
+        return FileResponse(
+            path=pdf_path,
+            media_type='application/pdf',
+            filename=os.path.basename(pdf_path)
+        )
         
     except Exception as e:
         logger.error(f"Error during PDF generation: {str(e)}")

@@ -70,8 +70,8 @@ def export_report_pdf(output_pdf_path: str, df_history: pd.DataFrame, df_forecas
         ax1.axis('off')
         
         # Extract summary information
-        hist_start = df_history['ds'].min()
-        hist_end = df_history['ds'].max()
+        hist_start = pd.to_datetime(df_history['ds'].min())
+        hist_end = pd.to_datetime(df_history['ds'].max())
         total_sales = df_history['y'].sum()
         
         # Create summary text
@@ -134,7 +134,7 @@ Model Details:
         
         # Get first 30 forecast rows
         df_table = df_forecast.head(30).copy()
-        df_table['ds'] = df_table['ds'].dt.strftime('%Y-%m-%d')
+        df_table['ds'] = pd.to_datetime(df_table['ds']).dt.strftime('%Y-%m-%d')
         
         # Round numeric columns
         for col in df_table.select_dtypes(include=[np.number]).columns:

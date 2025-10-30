@@ -194,28 +194,34 @@ if st.session_state.forecast_data:
     st.subheader("Forecast Table (First 50 Rows)")
     st.dataframe(df_forecast.head(50))
 
+# Add to session state to store PDF content
+if 'pdf_content' not in st.session_state:
+    st.session_state.pdf_content = None
+
 # Download PDF button
 if st.session_state.forecast_csv_path:
     if st.button("Download PDF Report"):
         try:
-            # Call the download endpoint
+            # Generate PDF report via FastAPI
             params = {"path": st.session_state.forecast_csv_path}
             response = requests.get(f"{FASTAPI_URL}/forecast/download", params=params)
             
             if response.status_code == 200:
-                result = response.json()
-                
-                # Create a download button for the PDF
-                st.download_button(
-                    label="Download PDF Report",
-                    data=response.content,
-                    file_name=result.get("filename", "forecast_report.pdf"),
-                    mime="application/pdf"
-                )
+                st.session_state.pdf_content = response.content
+                st.success("PDF report generated!")
             else:
                 st.error(f"PDF generation failed: {response.text}")
         except Exception as e:
-            st.error(f"Error downloading PDF: {str(e)}")
+            st.error(f"Error generating PDF: {str(e)}")
+
+    if st.session_state.pdf_content:
+        st.download_button(
+            label="Click here to download PDF",
+            data=st.session_state.pdf_content,
+            file_name="forecast_report.pdf",
+            mime="application/pdf",
+            key='download_pdf'  # Unique key prevents re-render issues
+        )
 
 # Health check
 try:

@@ -20,3 +20,6 @@ streamlit
 # Additional utilities
 requests
 pydantic
+
+# Visualization libraries
+plotly>=5.0.0
