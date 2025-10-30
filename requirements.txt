@@ -1,0 +1,22 @@
+# requirements.txt
+# FastAPI and related packages
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# Data science packages
+pandas
+numpy
+prophet
+scikit-learn
+matplotlib
+
+# Model serialization
+joblib
+
+# Streamlit for web app
+streamlit
+
+# Additional utilities
+requests
+pydantic

@@ -1,0 +1,187 @@
+# Environment
+venv/
+env/
+ENV/
+.venv/
+.env
+.env.local
+.env.*.local
+env.bak/
+venv.bak/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.gitattributes
+.pydevproject
+.scrapy
+webapp/css/
+webapp/gen/
+scrapy.cfg
+.DS_Store
+Thumbs.db
+
+# Data
+data/raw/
+data/processed/
+data/external/
+data/interim/
+*.csv
+*.json
+*.xlsx
+*.xls
+
+# Models
+models/
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+*.bin
+*.model
+
+# Output files
+*.out
+*.tmp
+*.temp
+*.save
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Thumbs.db:encryptable
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Logs
+*.log
+logs/
+log/
+
+# Virtual environments
+.envrc
+.python-version
+
+# Distribution / packaging
+.Python
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# IPython
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Local configuration
+config/
+secrets.json
+.credentials
+.env
+
+# FastAPI/uvicorn
+uvicorn_error.log
+
+# Streamlit
+.streamlit/
+.streamlit/secrets.toml
+
+# PDF reports
+*.pdf
+report.pdf
+test_report.pdf
+workflow_test_report.pdf
+
+# Any temporary data files used during development
+temp/
+tmp/
+*.tmp
+
+# Compiled files
+*.pyc
+*.pyo
+__pycache__/
+*.pyc
+*$py.class
+*.so
+
+# Custom
+*.csv  # For safety, though some might be tracked
+!sample_sales.csv  # Keep the sample file in repo
+!README.md
+!requirements.txt
+!app/
+!streamlit_app/
+!scripts/
+!tests/
