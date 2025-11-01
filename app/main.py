@@ -1,19 +1,22 @@
 # file: app/main.py
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Optional, Literal
 import os
 import logging
 from app.preprocessing import parse_and_process
 from app.train import train_prophet
 from app.predict import predict_prophet, save_forecast_csv
+from app.evaluation import rolling_cross_validation_prophet
 from app.utils import export_report_pdf
+from app.diagnostics import diagnose_model, save_diagnostics
 import pandas as pd
+import pandas.errors
 
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
@@ -32,38 +35,88 @@ app.add_middleware(
 # Pydantic models
 class PreprocessRequest(BaseModel):
     file_path: str
+    force_weekly: bool = False
 
 
 class TrainRequest(BaseModel):
     shop_csv: str
     model_out: str
+    include_regressors: bool = False
+    log_transform: bool = False
+    interval_width: float = Field(default=0.95, ge=0.5, le=0.99)
+    holdout_frac: float = Field(default=0.2, ge=0.1, le=0.5)
+    changepoint_prior_scale: float = Field(default=0.01, ge=0.001, le=0.5)
+    seasonality_prior_scale: float = Field(default=10.0, ge=0.01, le=100.0)
+    seasonality_mode: Literal["additive", "multiplicative"] = "additive"
+    auto_tune: bool = False
+    skip_holdout: bool = False  # Если True, использует ВСЕ данные для обучения (без теста)
 
 
 class PredictRequest(BaseModel):
     model_path: str
-    horizon: int
+    horizon: int = Field(..., ge=1, le=365)
+    log_transform: bool = False
+    future_regressor_strategy: Literal["ffill", "median"] = "ffill"
+    last_known_regressors_csv: Optional[str] = None
+    smooth_transition: bool = False
+    smooth_days: int = Field(default=14, ge=0, le=30)
+    smooth_alpha: float = Field(default=0.6, ge=0.0, le=1.0)
+    max_change_pct: float = Field(default=0.015, ge=0.001, le=0.1)
+
+
+class EvaluateRequest(BaseModel):
+    shop_csv: str
+    initial_days: int = Field(default=180, ge=30)
+    horizon_days: int = Field(default=30, ge=1)
+    period_days: int = Field(default=30, ge=1)
+    include_regressors: bool = False
+    log_transform: bool = False
 
 
 class PreprocessResponse(BaseModel):
     shop_csv: str
     category_csv: str
     stats: dict
+    aggregation_suggestion: dict  # freq: 'D' or 'W', reason: str
 
 
 class TrainResponse(BaseModel):
     model_path: str
-    backtest_metrics: dict
-    data_info: dict
+    metrics_path: str
+    metrics: dict
+    train_range: dict
+    test_range: dict
+    n_train: int
+    n_test: int
 
 
 class PredictResponse(BaseModel):
     forecast: list
+    forecast_csv_path: str
+    n_predictions: int
+
+
+class EvaluateResponse(BaseModel):
+    metrics: dict
+    cv_predictions_csv: str
+    n_cv_steps: int
+    summary: dict
+
+
+class DiagnoseRequest(BaseModel):
+    shop_csv: str
+    model_path: str
+    include_regressors: bool = False
 
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
     """Upload a CSV file to the server."""
     try:
+        # Validate file type
+        if not file.filename.endswith('.csv'):
+            raise HTTPException(status_code=400, detail="File must be a CSV file")
+        
         # Create directory if it doesn't exist
         os.makedirs("data/raw", exist_ok=True)
         
@@ -73,10 +126,16 @@ async def upload_file(file: UploadFile = File(...)):
             content = await file.read()
             buffer.write(content)
         
-        logger.info(f"File uploaded: {file_path}")
-        return {"file_path": file_path}
+        logger.info(f"File uploaded successfully: {file_path}")
+        return {
+            "status": "success",
+            "file_path": file_path,
+            "message": f"File '{file.filename}' uploaded successfully"
+        }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error uploading file: {str(e)}")
+        logger.error(f"Error uploading file: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
 
 
@@ -84,30 +143,72 @@ async def upload_file(file: UploadFile = File(...)):
 async def preprocess_data(request: PreprocessRequest):
     """Preprocess the uploaded CSV file."""
     try:
+        # Normalize input file path for cross-platform compatibility
+        normalized_input_path = os.path.normpath(request.file_path)
+        
         # Check if the file exists
-        if not os.path.exists(request.file_path):
-            raise HTTPException(status_code=404, detail="File not found")
+        if not os.path.exists(normalized_input_path):
+            raise HTTPException(status_code=404, detail=f"File not found: {normalized_input_path}")
         
         # Create output directories if they don't exist
         os.makedirs("data/processed", exist_ok=True)
         
         # Define output file paths
-        base_name = os.path.splitext(os.path.basename(request.file_path))[0]
+        base_name = os.path.splitext(os.path.basename(normalized_input_path))[0]
         out_shop_csv = os.path.join("data/processed", f"{base_name}_shop.csv")
         out_category_csv = os.path.join("data/processed", f"{base_name}_category.csv")
         
-        # Call the preprocessing function
-        result = parse_and_process(request.file_path, out_shop_csv, out_category_csv)
+        # Normalize output paths
+        out_shop_csv = os.path.normpath(out_shop_csv)
+        out_category_csv = os.path.normpath(out_category_csv)
         
-        logger.info(f"Preprocessing completed: {request.file_path}")
-        return PreprocessResponse(
-            shop_csv=result["shop_csv"],
-            category_csv=result["category_csv"],
-            stats=result["stats"]
+        # Call the preprocessing function
+        result = parse_and_process(
+            normalized_input_path, 
+            out_shop_csv, 
+            out_category_csv,
+            force_weekly=request.force_weekly
         )
+        
+        # Extract aggregation suggestion from stats
+        aggregation_suggestion = {
+            "freq": result["stats"].get("freq_used", "D"),
+            "reason": result["stats"].get("freq_reason", "Default daily aggregation")
+        }
+        
+        logger.info(f"Preprocessing completed: {normalized_input_path}")
+        logger.info(f"Aggregation: {aggregation_suggestion['freq']} - {aggregation_suggestion['reason']}")
+        
+        # Normalize paths for JSON response (use forward slashes for cross-platform compatibility)
+        shop_csv_normalized = result["shop_csv"].replace("\\", "/")
+        category_csv_normalized = result["category_csv"].replace("\\", "/")
+        
+        # Ensure stats are fully JSON-serializable
+        import json
+        stats_serialized = json.loads(json.dumps(result["stats"], default=str))
+        
+        return PreprocessResponse(
+            shop_csv=shop_csv_normalized,
+            category_csv=category_csv_normalized,
+            stats=stats_serialized,
+            aggregation_suggestion=aggregation_suggestion
+        )
+    except FileNotFoundError as e:
+        logger.error(f"File not found: {str(e)}")
+        raise HTTPException(status_code=404, detail=f"File not found: {str(e)}")
+    except ValueError as e:
+        logger.error(f"Validation error during preprocessing: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Validation error: {str(e)}")
+    except pandas.errors.EmptyDataError as e:
+        logger.error(f"Empty CSV file: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=400, detail=f"CSV file is empty or invalid: {str(e)}")
     except Exception as e:
-        logger.error(f"Error during preprocessing: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error during preprocessing: {str(e)}")
+        import traceback
+        error_traceback = traceback.format_exc()
+        logger.error(f"Unexpected error during preprocessing: {str(e)}", exc_info=True)
+        logger.error(f"Full traceback:\n{error_traceback}")
+        error_detail = f"Internal error: {str(e)}. Please check the CSV file format and required columns. Check server logs for details."
+        raise HTTPException(status_code=500, detail=error_detail)
 
 
 @app.post("/train", response_model=TrainResponse)
@@ -116,22 +217,69 @@ async def train_model(request: TrainRequest):
     try:
         # Check if the CSV file exists
         if not os.path.exists(request.shop_csv):
-            raise HTTPException(status_code=404, detail="Shop CSV file not found")
+            raise HTTPException(status_code=404, detail=f"Shop CSV file not found: {request.shop_csv}")
+        
+        # Validate model output path
+        if not request.model_out.endswith('.pkl'):
+            raise HTTPException(status_code=400, detail="Model output path must end with .pkl")
         
         # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(request.model_out), exist_ok=True)
+        model_dir = os.path.dirname(request.model_out)
+        if model_dir:
+            os.makedirs(model_dir, exist_ok=True)
         
         # Train the model
-        result = train_prophet(request.shop_csv, request.model_out, include_regressors=False)
+        logger.info(f"Training model with parameters: include_regressors={request.include_regressors}, "
+                   f"log_transform={request.log_transform}, interval_width={request.interval_width}, "
+                   f"holdout_frac={request.holdout_frac}, changepoint_prior_scale={request.changepoint_prior_scale}, "
+                   f"seasonality_prior_scale={request.seasonality_prior_scale}, seasonality_mode={request.seasonality_mode}, "
+                   f"auto_tune={request.auto_tune}")
+        
+        result = train_prophet(
+            shop_csv_path=request.shop_csv,
+            model_out_path=request.model_out,
+            include_regressors=request.include_regressors,
+            log_transform=request.log_transform,
+            interval_width=request.interval_width,
+            holdout_frac=request.holdout_frac,
+            changepoint_prior_scale=request.changepoint_prior_scale,
+            seasonality_prior_scale=request.seasonality_prior_scale,
+            seasonality_mode=request.seasonality_mode,
+            auto_tune=request.auto_tune,
+            skip_holdout=getattr(request, 'skip_holdout', False)
+        )
+        
+        metrics_path = request.model_out.replace('.pkl', '_metrics.json')
         
         logger.info(f"Model training completed: {request.model_out}")
+        
+        # Безопасное логирование метрик (могут быть None при skip_holdout=True)
+        mae_val = result['metrics'].get('mae')
+        rmse_val = result['metrics'].get('rmse')
+        mape_val = result['metrics'].get('mape')
+        
+        if mae_val is not None and rmse_val is not None and mape_val is not None:
+            logger.info(f"Metrics: MAE={mae_val:.2f}, RMSE={rmse_val:.2f}, MAPE={mape_val:.2f}%")
+        else:
+            logger.info(f"Metrics: N/A (skip_holdout=True, no test set)")
+        
         return TrainResponse(
             model_path=result["model_path"],
-            backtest_metrics=result["backtest_metrics"],
-            data_info=result["data_info"]
+            metrics_path=metrics_path,
+            metrics=result["metrics"],
+            train_range=result["train_range"],
+            test_range=result["test_range"],
+            n_train=result["n_train"],
+            n_test=result["n_test"]
         )
+    except FileNotFoundError as e:
+        logger.error(f"File not found: {str(e)}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        logger.error(f"Validation error during training: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Error during model training: {str(e)}")
+        logger.error(f"Error during model training: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error during model training: {str(e)}")
 
 
@@ -141,29 +289,125 @@ async def predict_data(request: PredictRequest):
     try:
         # Check if the model file exists
         if not os.path.exists(request.model_path):
-            raise HTTPException(status_code=404, detail="Model file not found")
+            raise HTTPException(status_code=404, detail=f"Model file not found: {request.model_path}")
+        
+        # Validate horizon
+        if not (1 <= request.horizon <= 365):
+            raise HTTPException(status_code=400, detail="Horizon must be between 1 and 365 days")
+        
+        # Validate regressor strategy
+        if request.future_regressor_strategy not in ["ffill", "median"]:
+            raise HTTPException(status_code=400, detail="future_regressor_strategy must be 'ffill' or 'median'")
+        
+        # Map strategy name to function parameter
+        regressor_fill_method = "forward" if request.future_regressor_strategy == "ffill" else "median"
         
         # Generate forecast
-        df_forecast = predict_prophet(request.model_path, request.horizon)
+        logger.info(f"Generating forecast: horizon={request.horizon}, log_transform={request.log_transform}, "
+                   f"regressor_strategy={request.future_regressor_strategy}")
         
-        # Save forecast to CSV
-        os.makedirs("data/processed", exist_ok=True)
+        df_forecast = predict_prophet(
+            model_path=request.model_path,
+            horizon_days=request.horizon,
+            last_known_regressors_csv=request.last_known_regressors_csv,
+            log_transform=request.log_transform,
+            regressor_fill_method=regressor_fill_method,
+            smooth_transition=request.smooth_transition,
+            smooth_days=request.smooth_days,
+            smooth_alpha=request.smooth_alpha,
+            max_change_pct=request.max_change_pct
+        )
+        
+        # Forecast is already saved to default location by predict_prophet
         forecast_csv_path = "data/processed/forecast_shop.csv"
-        save_forecast_csv(df_forecast, forecast_csv_path)
         
         # Convert DataFrame to list of dictionaries for JSON response
         forecast_list = df_forecast.to_dict(orient="records")
         
-        logger.info(f"Forecasting completed, results saved to: {forecast_csv_path}")
-        return PredictResponse(forecast=forecast_list)
+        logger.info(f"Forecasting completed: {len(forecast_list)} predictions saved to {forecast_csv_path}")
+        
+        return PredictResponse(
+            forecast=forecast_list,
+            forecast_csv_path=forecast_csv_path,
+            n_predictions=len(forecast_list)
+        )
+    except FileNotFoundError as e:
+        logger.error(f"File not found: {str(e)}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        logger.error(f"Validation error during prediction: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Error during prediction: {str(e)}")
+        logger.error(f"Error during prediction: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error during prediction: {str(e)}")
 
 
+@app.post("/evaluate", response_model=EvaluateResponse)
+async def evaluate_model(request: EvaluateRequest):
+    """Perform rolling cross-validation for model evaluation."""
+    try:
+        # Check if the CSV file exists
+        if not os.path.exists(request.shop_csv):
+            raise HTTPException(status_code=404, detail=f"Shop CSV file not found: {request.shop_csv}")
+        
+        # Load data
+        logger.info(f"Loading data from: {request.shop_csv}")
+        df = pd.read_csv(request.shop_csv)
+        df['ds'] = pd.to_datetime(df['ds'])
+        df = df.sort_values('ds').reset_index(drop=True)
+        
+        # Perform cross-validation
+        logger.info(f"Starting CV with: initial={request.initial_days}, horizon={request.horizon_days}, "
+                   f"period={request.period_days}, include_regressors={request.include_regressors}, "
+                   f"log_transform={request.log_transform}")
+        
+        result = rolling_cross_validation_prophet(
+            shop_df=df,
+            initial_days=request.initial_days,
+            horizon_days=request.horizon_days,
+            period_days=request.period_days,
+            include_regressors=request.include_regressors,
+            log_transform=request.log_transform
+        )
+        
+        # Save predictions CSV
+        os.makedirs("data/processed", exist_ok=True)
+        cv_predictions_csv = "data/processed/cv_predictions.csv"
+        result['predictions_df'].to_csv(cv_predictions_csv, index=False)
+        
+        # Prepare summary
+        summary = {
+            "mae_mean": result['metrics']['mae']['mean'],
+            "mae_std": result['metrics']['mae']['std'],
+            "rmse_mean": result['metrics']['rmse']['mean'],
+            "rmse_std": result['metrics']['rmse']['std'],
+            "mape_mean": result['metrics']['mape']['mean'],
+            "mape_std": result['metrics']['mape']['std']
+        }
+        
+        logger.info(f"CV completed: {result['metrics']['n_cv_steps']} steps")
+        logger.info(f"Summary: MAE={summary['mae_mean']:.2f}±{summary['mae_std']:.2f}, "
+                   f"RMSE={summary['rmse_mean']:.2f}±{summary['rmse_std']:.2f}, "
+                   f"MAPE={summary['mape_mean']:.2f}%±{summary['mape_std']:.2f}%")
+        
+        return EvaluateResponse(
+            metrics=result['metrics'],
+            cv_predictions_csv=cv_predictions_csv,
+            n_cv_steps=result['metrics']['n_cv_steps'],
+            summary=summary
+        )
+    except FileNotFoundError as e:
+        logger.error(f"File not found: {str(e)}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        logger.error(f"Validation error during evaluation: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error during evaluation: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error during evaluation: {str(e)}")
+
+
 from fastapi.responses import FileResponse
-import tempfile
-import uuid
 
 
 @app.get("/forecast/download")
@@ -174,25 +418,87 @@ async def download_forecast_pdf(path: str = Query(..., description="Path to the 
         if not path.endswith(".csv"):
             raise HTTPException(status_code=400, detail="Path must point to a CSV file")
         
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail=f"Forecast CSV file not found: {path}")
+        
         # Read the forecast CSV
         df_forecast = pd.read_csv(path)
         
-        # Try to read the history data (using the shop CSV if available)
-        shop_csv_path = path.replace("_category.csv", "_shop.csv").replace("forecast_shop.csv", "shop.csv")
-        if os.path.exists(shop_csv_path):
-            df_history = pd.read_csv(shop_csv_path)
-        else:
-            # If history is not available, create an empty history DataFrame
-            df_history = pd.DataFrame(columns=['ds', 'y'])
+        # Validate required columns
+        required_cols = ['ds', 'yhat', 'yhat_lower', 'yhat_upper']
+        missing_cols = [col for col in required_cols if col not in df_forecast.columns]
+        if missing_cols:
+            raise HTTPException(status_code=400, detail=f"Forecast CSV missing required columns: {', '.join(missing_cols)}")
         
-        # Create a simple metrics dictionary for the report
+        # Try to read the history data (using the shop CSV if available)
+        # Try multiple possible paths for the shop CSV
+        base_dir = os.path.dirname(path)
+        possible_paths = [
+            path.replace("_category.csv", "_shop.csv").replace("forecast_shop.csv", "sales_data_shop.csv"),
+            os.path.join(base_dir, "sales_data_shop.csv"),
+            path.replace("forecast_shop.csv", "sales_data_shop.csv"),
+            path.replace("forecast_category.csv", "sales_data_category.csv").replace("_category.csv", "_shop.csv"),
+        ]
+        
+        df_history = pd.DataFrame(columns=['ds', 'y'])
+        shop_csv_path = None
+        
+        for possible_path in possible_paths:
+            if os.path.exists(possible_path):
+                try:
+                    df_history_temp = pd.read_csv(possible_path)
+                    # Validate that it has required columns
+                    if 'ds' in df_history_temp.columns and 'y' in df_history_temp.columns:
+                        df_history = df_history_temp
+                        shop_csv_path = possible_path
+                        logger.info(f"Found history CSV at: {shop_csv_path} ({len(df_history)} rows)")
+                        break
+                    else:
+                        logger.warning(f"History CSV at {possible_path} missing required columns (ds, y)")
+                except Exception as e:
+                    logger.warning(f"Error reading history CSV at {possible_path}: {str(e)}")
+                    continue
+        
+        if shop_csv_path is None:
+            # If history is not available, create an empty history DataFrame
+            logger.warning(f"History CSV not found in any of the attempted paths, using empty history")
+        
+        # Try to load metrics from JSON if available
+        # Metrics are saved next to the model, try standard location first
+        possible_metrics_paths = [
+            "models/prophet_model_metrics.json",  # Standard location
+            path.replace('.csv', '_metrics.json').replace('forecast', 'model'),
+            os.path.join(os.path.dirname(path), "prophet_model_metrics.json"),
+            os.path.join("models", os.path.basename(path).replace("forecast_shop.csv", "prophet_model_metrics.json")),
+        ]
+        
         metrics = {
             'mae': 'N/A',
             'rmse': 'N/A',
-            'mape': 'N/A'
+            'mape': 'N/A',
+            'log_transform': False,
+            'interval_width': 0.95
         }
         
-        # Generate a PDF path using a temporary file
+        metrics_found = False
+        for metrics_json_path in possible_metrics_paths:
+            if os.path.exists(metrics_json_path):
+                try:
+                    import json
+                    with open(metrics_json_path, 'r') as f:
+                        loaded_metrics = json.load(f)
+                        metrics.update(loaded_metrics)
+                    logger.info(f"Loaded metrics from: {metrics_json_path}")
+                    metrics_found = True
+                    break
+                except Exception as e:
+                    logger.warning(f"Error reading metrics from {metrics_json_path}: {str(e)}")
+                    continue
+        
+        if not metrics_found:
+            logger.warning("Metrics JSON not found, using default values (N/A)")
+        
+        # Generate a PDF path
         pdf_path = path.replace('.csv', '_report.pdf')
         
         # Generate the PDF report
@@ -207,9 +513,84 @@ async def download_forecast_pdf(path: str = Query(..., description="Path to the 
             filename=os.path.basename(pdf_path)
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error during PDF generation: {str(e)}")
+        logger.error(f"Error during PDF generation: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error during PDF generation: {str(e)}")
+
+
+@app.post("/diagnose")
+async def diagnose_model_endpoint(request: DiagnoseRequest):
+    """Perform model diagnostics."""
+    try:
+        # Check if files exist
+        if not os.path.exists(request.shop_csv):
+            raise HTTPException(status_code=404, detail=f"Shop CSV file not found: {request.shop_csv}")
+        if not os.path.exists(request.model_path):
+            raise HTTPException(status_code=404, detail=f"Model file not found: {request.model_path}")
+        
+        # Load data
+        logger.info(f"Loading data from: {request.shop_csv}")
+        df_history = pd.read_csv(request.shop_csv)
+        df_history['ds'] = pd.to_datetime(df_history['ds'])
+        df_history = df_history.sort_values('ds').reset_index(drop=True)
+        
+        # Load model and generate forecast for diagnostics
+        import joblib
+        
+        # Generate forecast on historical data for comparison
+        model = joblib.load(request.model_path)
+        
+        # Check if model requires regressors
+        requires_regressors = len(model.extra_regressors) > 0 if hasattr(model, 'extra_regressors') else False
+        
+        # Auto-detect if regressors are needed
+        if not request.include_regressors and requires_regressors:
+            logger.info("Model requires regressors but not provided, auto-detecting from model")
+            request.include_regressors = True
+        
+        # Create future dataframe for all historical dates
+        future = model.make_future_dataframe(periods=0, freq='D')
+        
+        if requires_regressors or request.include_regressors:
+            if 'avg_price' in df_history.columns and 'avg_discount' in df_history.columns:
+                regressors = df_history[['ds', 'avg_price', 'avg_discount']]
+                future = future.merge(regressors, on='ds', how='left')
+                for col in ['avg_price', 'avg_discount']:
+                    future[col] = future[col].ffill().fillna(regressors[col].median())
+            else:
+                logger.warning("Model requires regressors but they are not in data")
+                if requires_regressors:
+                    raise ValueError("Model was trained with regressors but they are missing in historical data")
+        
+        forecast = model.predict(future)
+        df_forecast = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
+        
+        # Perform diagnostics
+        logger.info("Performing model diagnostics...")
+        diagnostics = diagnose_model(
+            df_history=df_history,
+            df_forecast=df_forecast,
+            model_name=os.path.basename(request.model_path),
+            include_regressors=request.include_regressors
+        )
+        
+        # Save diagnostics
+        os.makedirs("analysis", exist_ok=True)
+        diagnostics_path = "analysis/model_diagnostics.json"
+        save_diagnostics(diagnostics, diagnostics_path)
+        
+        logger.info(f"Diagnostics completed and saved to {diagnostics_path}")
+        
+        return diagnostics
+        
+    except FileNotFoundError as e:
+        logger.error(f"File not found: {str(e)}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error during diagnostics: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error during diagnostics: {str(e)}")
 
 
 @app.get("/health")
@@ -221,4 +602,4 @@ async def health_check():
 # If running as a script, start the server
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8888)

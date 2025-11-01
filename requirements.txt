@@ -10,6 +10,7 @@ numpy
 prophet
 scikit-learn
 matplotlib
+scipy
 
 # Model serialization
 joblib
@@ -23,3 +24,7 @@ pydantic
 
 # Visualization libraries
 plotly>=5.0.0
+
+# Optional: TensorFlow/Keras for LSTM models (can be installed separately)
+# tensorflow>=2.10.0
+# Note: LSTM models will be skipped if TensorFlow is not installed
