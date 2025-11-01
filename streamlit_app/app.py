@@ -12,13 +12,13 @@ import json
 
 # Set up the page configuration
 st.set_page_config(
-    page_title="Sales Forecasting App",
+    page_title="Приложение прогнозирования продаж",
     page_icon="📊",
     layout="wide"
 )
 
 # Title
-st.title("📊 Sales Forecasting App")
+st.title("📊 Приложение прогнозирования продаж")
 
 # Initialize session state
 if 'uploaded_file_path' not in st.session_state:
@@ -55,32 +55,73 @@ FASTAPI_URL = os.getenv("FASTAPI_URL", "http://localhost:8888")
 
 # Sidebar: Health check
 with st.sidebar:
-    st.header("API Status")
+    st.header("Статус API")
     try:
         health_response = requests.get(f"{FASTAPI_URL}/health", timeout=5)
         if health_response.status_code == 200:
-            st.success("✅ Backend API is running")
+            st.success("✅ Backend API работает")
         else:
-            st.error("❌ Backend API is not responding")
+            st.error("❌ Backend API не отвечает")
     except:
-        st.error("❌ Unable to connect to backend API")
+        st.error("❌ Не удалось подключиться к backend API")
     
-    st.header("Help")
-    with st.expander("About this app"):
+    st.header("Помощь")
+    with st.expander("О приложении"):
         st.write("""
-        This application allows you to:
-        1. Upload sales data (CSV)
-        2. Preprocess and validate data
-        3. Train Prophet forecasting models
-        4. Evaluate models with cross-validation
-        5. Generate predictions
-        6. Download reports as PDF
+        Это приложение позволяет:
+        1. Загружать данные о продажах (CSV)
+        2. Обрабатывать и валидировать данные
+        3. Обучать модели прогнозирования Prophet
+        4. Оценивать модели с помощью кросс-валидации
+        5. Генерировать прогнозы
+        6. Скачивать отчеты в формате PDF
+        """)
+    
+    # Добавляем секцию с пояснениями к параметрам
+    with st.expander("📚 Пояснения к параметрам и метрикам", expanded=False):
+        st.write("""
+        **Основные параметры данных:**
+        
+        - **y** - Фактическое значение продаж в исторических данных (target variable). Это реальные данные о продажах за прошлые периоды.
+        
+        - **yhat** - Прогнозируемое значение. Это предсказание модели для будущих периодов или тестового набора.
+        
+        - **ds** - Дата (date string). Столбец с датами в формате, который понимает Prophet.
+        
+        **Метрики качества модели:**
+        
+        - **MAPE** (Mean Absolute Percentage Error) - Средняя абсолютная процентная ошибка. 
+          Показывает среднее процентное отклонение прогноза от фактических значений.
+          - < 15% - Отличное качество
+          - 15-20% - Хорошее качество
+          - 20-30% - Удовлетворительное качество
+          - > 30% - Требует улучшения
+        
+        - **MAE** (Mean Absolute Error) - Средняя абсолютная ошибка в единицах измерения.
+          Показывает среднюю величину ошибки без учета направления (переоценка/недооценка).
+        
+        - **RMSE** (Root Mean Square Error) - Корень среднеквадратичной ошибки.
+          Учитывает большие ошибки сильнее, чем MAE. Полезно для выявления выбросов.
+        
+        **Параметры модели:**
+        
+        - **Interval width** - Ширина доверительного интервала (0.95 = 95%).
+          Показывает диапазон, в который с указанной вероятностью попадут фактические значения.
+        
+        - **Holdout fraction** - Доля данных для тестирования.
+          Часть данных, которая не используется для обучения и служит для оценки качества.
+        
+        - **Changepoint flexibility** - Гибкость обнаружения точек изменения тренда.
+          Выше значение = модель более гибкая, но риск переобучения.
+        
+        - **Seasonality strength** - Сила сезонных компонентов.
+          Контролирует, насколько сильно модель учитывает сезонные паттерны.
         """)
 
 # File uploader
-st.header("📁 Step 1: Upload Data")
-uploaded_file = st.file_uploader("Upload your sales CSV file", type=["csv"], 
-                                 help="CSV file must contain columns: Sale_Date, Product_ID, Product_Category, Unit_Price, Discount, Quantity_Sold")
+st.header("📁 Шаг 1: Загрузка данных")
+uploaded_file = st.file_uploader("Загрузите CSV файл с данными о продажах", type=["csv"], 
+                                 help="CSV файл должен содержать колонки: Sale_Date, Product_ID, Product_Category, Unit_Price, Discount, Quantity_Sold")
 
 if uploaded_file is not None:
     # Display raw data preview
@@ -89,16 +130,16 @@ if uploaded_file is not None:
     
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("Raw Data Preview")
+        st.subheader("Предпросмотр исходных данных")
         st.dataframe(df_raw.head(10))
     
     with col2:
-        st.subheader("Detected Columns")
-        st.write(f"Columns: {', '.join(df_raw.columns.tolist())}")
-        st.write(f"Total rows: {len(df_raw)}")
+        st.subheader("Обнаруженные колонки")
+        st.write(f"Колонки: {', '.join(df_raw.columns.tolist())}")
+        st.write(f"Всего строк: {len(df_raw)}")
     
     # Upload file to backend
-    if st.button("📤 Upload to Backend", help="Uploads the CSV file to the backend API"):
+    if st.button("📤 Загрузить в Backend", help="Загружает CSV файл в backend API"):
         try:
             files = {"file": (uploaded_file.name, bytes_data, "text/csv")}
             response = requests.post(f"{FASTAPI_URL}/upload", files=files, timeout=30)
@@ -106,23 +147,23 @@ if uploaded_file is not None:
             if response.status_code == 200:
                 result = response.json()
                 st.session_state.uploaded_file_path = result["file_path"]
-                st.success(f"✅ File uploaded successfully: {result['file_path']}")
+                st.success(f"✅ Файл успешно загружен: {result['file_path']}")
             else:
-                st.error(f"❌ Upload failed: {response.text}")
+                st.error(f"❌ Ошибка загрузки: {response.text}")
         except Exception as e:
-            st.error(f"❌ Error uploading file: {str(e)}")
+            st.error(f"❌ Ошибка при загрузке файла: {str(e)}")
 
 # Preprocess section
-st.header("⚙️ Step 2: Preprocess Data")
+st.header("⚙️ Шаг 2: Предобработка данных")
 if st.session_state.uploaded_file_path:
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.info(f"📄 File ready: {st.session_state.uploaded_file_path}")
+        st.info(f"📄 Файл готов: {st.session_state.uploaded_file_path}")
     with col2:
-        force_weekly = st.checkbox("Force weekly aggregation", 
-                                  help="Force weekly aggregation regardless of data density")
+        force_weekly = st.checkbox("Принудительная недельная агрегация", 
+                                  help="Принудительно использовать недельную агрегацию независимо от плотности данных")
     
-    if st.button("🔄 Preprocess Data", help="Preprocesses the uploaded CSV, validates data, and generates shop/category aggregates"):
+    if st.button("🔄 Предобработать данные", help="Обрабатывает загруженный CSV, валидирует данные и генерирует агрегаты по магазинам/категориям"):
         try:
             payload = {
                 "file_path": st.session_state.uploaded_file_path,
@@ -136,48 +177,48 @@ if st.session_state.uploaded_file_path:
                 st.session_state.preprocessed_category_csv = result["category_csv"]
                 st.session_state.preprocessing_stats = result["stats"]
                 
-                st.success("✅ Data preprocessed successfully!")
+                st.success("✅ Данные успешно предобработаны!")
                 
                 # Show stats
-                st.subheader("📊 Preprocessing Statistics")
+                st.subheader("📊 Статистика предобработки")
                 
                 stats = result["stats"]
                 agg_suggestion = result.get("aggregation_suggestion", {})
                 
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("Total Rows (Raw)", stats.get("n_rows_raw", "N/A"))
-                    st.metric("Rows After Cleaning", stats.get("n_rows_clean", "N/A"))
-                    st.metric("Unique Dates", stats.get("n_unique_dates", "N/A"))
+                    st.metric("Всего строк (исходных)", stats.get("n_rows_raw", "N/A"))
+                    st.metric("Строк после очистки", stats.get("n_rows_clean", "N/A"))
+                    st.metric("Уникальных дат", stats.get("n_unique_dates", "N/A"))
                 
                 with col2:
-                    st.metric("Date Range Start", stats.get("date_min", "N/A")[:10] if stats.get("date_min") else "N/A")
-                    st.metric("Date Range End", stats.get("date_max", "N/A")[:10] if stats.get("date_max") else "N/A")
-                    st.metric("Duplicates Removed", stats.get("duplicates_removed", 0))
+                    st.metric("Начало периода", stats.get("date_min", "N/A")[:10] if stats.get("date_min") else "N/A")
+                    st.metric("Конец периода", stats.get("date_max", "N/A")[:10] if stats.get("date_max") else "N/A")
+                    st.metric("Дубликатов удалено", stats.get("duplicates_removed", 0))
                 
                 with col3:
                     freq_used = stats.get("freq_used", "D")
                     freq_icon = "📅" if freq_used == "D" else "📆"
-                    st.metric("Aggregation Frequency", f"{freq_icon} {freq_used}")
+                    st.metric("Частота агрегации", f"{freq_icon} {freq_used}")
                     
                     if agg_suggestion:
-                        st.info(f"💡 Suggestion: {agg_suggestion.get('freq', 'D')} - {agg_suggestion.get('reason', '')}")
+                        st.info(f"💡 Рекомендация: {agg_suggestion.get('freq', 'D')} - {agg_suggestion.get('reason', '')}")
                 
                 if stats.get("warning"):
                     st.warning(f"⚠️ {stats['warning']}")
                 
                 # Show detailed stats
-                with st.expander("📋 Detailed Statistics"):
+                with st.expander("📋 Детальная статистика"):
                     st.json(stats)
             else:
-                st.error(f"❌ Preprocessing failed: {response.text}")
+                st.error(f"❌ Ошибка предобработки: {response.text}")
         except Exception as e:
-            st.error(f"❌ Error preprocessing data: {str(e)}")
+            st.error(f"❌ Ошибка при предобработке данных: {str(e)}")
 
 # Train section
-st.header("🎯 Step 3: Train Model")
+st.header("🎯 Шаг 3: Обучение модели")
 if st.session_state.preprocessed_shop_csv:
-    st.info(f"📊 Using shop data: {st.session_state.preprocessed_shop_csv}")
+    st.info(f"📊 Используются данные магазинов: {st.session_state.preprocessed_shop_csv}")
     
     # Show recommended settings for best results
     with st.expander("💡 Рекомендуемые настройки для лучшего качества", expanded=False):
@@ -239,48 +280,48 @@ if st.session_state.preprocessed_shop_csv:
         pass  # Skip recommendations if data can't be loaded
     
     # Model configuration
-    with st.expander("⚙️ Model Configuration", expanded=True):
+    with st.expander("⚙️ Конфигурация модели", expanded=True):
         col1, col2 = st.columns(2)
         
         with col1:
             include_regressors = st.checkbox(
-                "Use regressors (price/discount)",
+                "Использовать регрессоры (цена/скидка)",
                 value=False,
-                help="Include average price and average discount as regressors in the Prophet model"
+                help="Включить среднюю цену и среднюю скидку как дополнительные факторы в модель Prophet"
             )
             
             log_transform = st.checkbox(
-                "Apply log-transform to target",
+                "Применить log-transform к целевому показателю",
                 value=False,
-                help="⚠️ РЕКОМЕНДУЕТСЯ для данных с высокой волатильностью! Apply log1p transformation to target variable (useful for skewed data)"
+                help="⚠️ РЕКОМЕНДУЕТСЯ для данных с высокой волатильностью! Применяет преобразование log1p к переменной y (полезно для асимметричных данных)"
             )
         
         with col2:
             interval_width = st.slider(
-                "Interval width",
+                "Ширина доверительного интервала",
                 min_value=0.5,
                 max_value=0.99,
                 value=0.95,
                 step=0.01,
-                help="Confidence interval width for predictions (0.95 = 95% confidence)"
+                help="Ширина доверительного интервала для прогнозов (0.95 = 95% уверенности). Показывает диапазон, в который с указанной вероятностью попадут фактические значения."
             )
             
             holdout_frac = st.slider(
-                "Holdout fraction",
+                "Доля данных для тестирования",
                 min_value=0.05,
                 max_value=0.5,
                 value=0.2,
                 step=0.05,
-                help="Fraction of data to use for testing (e.g., 0.2 = 20% for test set)"
+                help="Доля данных для тестового набора (например, 0.2 = 20% данных пойдут на тест). Эти данные не используются для обучения и служат для оценки качества модели."
             )
         
         # Skip holdout option (для прогноза на будущее)
         skip_holdout = st.checkbox(
-            "🚀 Train on ALL data (skip holdout) - для прогноза на будущее",
+            "🚀 Обучить на ВСЕХ данных (пропустить holdout) - для прогноза на будущее",
             value=False,
             help="Если включено: модель обучается на ВСЕХ данных без разделения на train/test. "
                  "Используйте для продакшн-прогнозов на реальное будущее (не на тестовый период). "
-                 "⚠️ Метрики (MAPE, MAE) не будут вычислены, так как нет тестового набора."
+                 "⚠️ Метрики качества (MAPE, MAE, RMSE) не будут вычислены, так как нет тестового набора."
         )
         
         if skip_holdout:
@@ -289,24 +330,44 @@ if st.session_state.preprocessed_shop_csv:
                    "Holdout fraction будет проигнорирован.")
         
         # Advanced hyperparameters
-        with st.expander("🔧 Advanced Hyperparameters (для улучшения качества)", expanded=False):
+        with st.expander("🔧 Продвинутые гиперпараметры (для улучшения качества)", expanded=False):
             # Warning about log_transform + multiplicative combination
             if log_transform:
-                st.info("💡 **Совет**: При включенном log-transform обычно лучше использовать **additive** seasonality. Multiplicative + log-transform могут конфликтовать и давать слишком широкие confidence intervals.")
+                st.info("💡 **Совет**: При включенном log-transform обычно лучше использовать **additive** seasonality. Multiplicative + log-transform могут конфликтовать и давать слишком широкие доверительные интервалы.")
+            
+            with st.expander("📚 Пояснения к гиперпараметрам", expanded=False):
+                st.write("""
+                **Режим сезонности (Seasonality mode):**
+                - **Additive**: Сезонность добавляется к тренду. Подходит для данных с постоянной амплитудой сезонных колебаний.
+                - **Multiplicative**: Сезонность умножается на тренд. Подходит для данных, где сезонные колебания растут вместе с трендом. 
+                  ⚠️ Не рекомендуется использовать вместе с log-transform!
+                
+                **Гибкость точек изменения (Changepoint flexibility):**
+                - Контролирует, насколько гибко модель обнаруживает изменения тренда
+                - Низкие значения (0.001-0.01): Консервативный подход, меньше точек изменения, более плавный тренд
+                - Высокие значения (0.1-0.5): Больше гибкости, больше точек изменения, риск переобучения
+                - Рекомендуется: 0.005-0.01 для стабильных данных, 0.01-0.05 для волатильных
+                
+                **Сила сезонности (Seasonality strength):**
+                - Контролирует, насколько сильно модель учитывает сезонные паттерны
+                - Низкие значения (1-5): Слабый эффект сезонности
+                - Стандартные значения (10-15): Умеренный эффект
+                - Высокие значения (20-50): Сильный эффект сезонности
+                """)
             
             col1, col2, col3 = st.columns(3)
             
             with col1:
                 seasonality_mode = st.selectbox(
-                    "Seasonality mode",
+                    "Режим сезонности",
                     options=["additive", "multiplicative"],
                     index=0 if log_transform else 0,  # Suggest additive if log_transform is on
-                    help="additive: сезонность добавляется к тренду. multiplicative: сезонность умножается на тренд (лучше для высокой волатильности, но БЕЗ log-transform)"
+                    help="Additive: сезонность добавляется к тренду. Multiplicative: сезонность умножается на тренд (лучше для высокой волатильности, но БЕЗ log-transform)"
                 )
             
             with col2:
                 changepoint_prior_scale = st.slider(
-                    "Changepoint flexibility",
+                    "Гибкость точек изменения тренда",
                     min_value=0.001,
                     max_value=0.5,
                     value=0.01,
@@ -317,7 +378,7 @@ if st.session_state.preprocessed_shop_csv:
             
             with col3:
                 seasonality_prior_scale = st.slider(
-                    "Seasonality strength",
+                    "Сила сезонности",
                     min_value=0.01,
                     max_value=100.0,
                     value=10.0,
@@ -328,14 +389,14 @@ if st.session_state.preprocessed_shop_csv:
     col1, col2 = st.columns([1, 1])
     with col1:
         model_out_path = st.text_input(
-            "Model output path",
+            "Путь сохранения модели",
             value="models/prophet_model.pkl",
-            help="Path where the trained model will be saved"
+            help="Путь, по которому будет сохранена обученная модель"
         )
     
     # Auto-tune option
     auto_tune = st.checkbox(
-        "🔍 Auto-tune model (Grid Search)",
+        "🔍 Автоматический подбор параметров (Grid Search)",
         value=False,
         help="Автоматически находит лучшую конфигурацию модели через grid search (Prophet варианты, LSTM, Hybrid). Это займет больше времени, но даст лучшие результаты."
     )
@@ -343,7 +404,7 @@ if st.session_state.preprocessed_shop_csv:
     if auto_tune:
         st.info("💡 При включенном auto-tune будут протестированы различные конфигурации Prophet, LSTM и гибридные модели. Результаты сохранятся в analysis/model_comparison.csv")
     
-    if st.button("🚀 Train Model", help="Trains a Prophet model with the selected configuration"):
+    if st.button("🚀 Обучить модель", help="Обучает модель Prophet с выбранной конфигурацией"):
         try:
             payload = {
                 "shop_csv": st.session_state.preprocessed_shop_csv,
@@ -359,7 +420,7 @@ if st.session_state.preprocessed_shop_csv:
                 "skip_holdout": skip_holdout  # Новый параметр
             }
             
-            spinner_text = "Training model with auto-tuning (this may take several minutes)..." if auto_tune else "Training model... This may take a while."
+            spinner_text = "Обучение модели с автоматическим подбором параметров (это может занять несколько минут)..." if auto_tune else "Обучение модели... Это может занять некоторое время."
             timeout_val = 1800 if auto_tune else 300  # 30 minutes for auto-tune, 5 minutes for regular
             
             with st.spinner(spinner_text):
@@ -371,14 +432,56 @@ if st.session_state.preprocessed_shop_csv:
                 st.session_state.training_metrics = result["metrics"]
                 
                 if skip_holdout:
-                    st.success("✅ Model trained successfully on ALL data! Ready for production forecasts.")
+                    st.success("✅ Модель успешно обучена на ВСЕХ данных! Готова для продакшн-прогнозов.")
                     st.info("💡 **Режим прогноза на будущее:** Метрики не вычислены (нет тестового набора). "
-                            "Используйте раздел 'Generate Forecast' для прогноза на реальные будущие даты.")
+                            "Используйте раздел 'Генерация прогноза' для прогноза на реальные будущие даты.")
                 else:
-                    st.success("✅ Model trained successfully!")
+                    st.success("✅ Модель успешно обучена!")
                 
                 # Display metrics
-                st.subheader("📈 Training Metrics")
+                st.subheader("📈 Метрики обучения")
+                
+                # Добавляем expander с пояснениями к метрикам
+                with st.expander("📚 Пояснения к метрикам качества", expanded=False):
+                    st.write("""
+                    **MAPE (Mean Absolute Percentage Error) - Средняя абсолютная процентная ошибка**
+                    
+                    Показывает среднее процентное отклонение прогноза от фактических значений.
+                    
+                    Интерпретация:
+                    - **< 15%** - ✅ Отличное качество, модель готова к продакшену
+                    - **15-20%** - ✅ Хорошее качество
+                    - **20-30%** - 🟡 Удовлетворительное качество, можно улучшить
+                    - **> 30%** - ⚠️ Низкое качество, требуется настройка параметров
+                    - **> 50%** - 🚨 Критически плохое качество, модель не готова к использованию
+                    
+                    Формула: MAPE = (1/n) × Σ|y_actual - y_predicted| / |y_actual| × 100%
+                    
+                    ---
+                    
+                    **MAE (Mean Absolute Error) - Средняя абсолютная ошибка**
+                    
+                    Показывает среднюю величину ошибки в единицах измерения (например, в единицах продаж).
+                    Не учитывает направление ошибки (переоценка или недооценка).
+                    
+                    Формула: MAE = (1/n) × Σ|y_actual - y_predicted|
+                    
+                    ---
+                    
+                    **RMSE (Root Mean Square Error) - Корень среднеквадратичной ошибки**
+                    
+                    Учитывает большие ошибки сильнее, чем MAE. Полезно для выявления выбросов и сильных отклонений.
+                    Всегда >= MAE.
+                    
+                    Формула: RMSE = √[(1/n) × Σ(y_actual - y_predicted)²]
+                    
+                    ---
+                    
+                    **CI Coverage (Coverage Rate) - Покрытие доверительного интервала**
+                    
+                    Показывает процент фактических значений, которые попали в предсказанный доверительный интервал.
+                    Хорошее покрытие: >= 85% (для 95% интервала).
+                    """)
                 
                 metrics = result["metrics"]
                 
@@ -414,14 +517,18 @@ if st.session_state.preprocessed_shop_csv:
                         mape_color = "normal"
                     
                     with col1:
-                        st.metric("MAE", f"{mae_val:.2f}" if mae_val is not None else "N/A")
+                        st.metric("MAE (Средняя абсолютная ошибка)", f"{mae_val:.2f}" if mae_val is not None else "N/A", 
+                                 help="Средняя величина ошибки в единицах измерения")
                     with col2:
-                        st.metric("RMSE", f"{rmse_val:.2f}" if rmse_val is not None else "N/A")
+                        st.metric("RMSE (Корень среднеквадратичной ошибки)", f"{rmse_val:.2f}" if rmse_val is not None else "N/A",
+                                 help="Учитывает большие ошибки сильнее, чем MAE")
                     with col3:
                         if mape_val is not None:
-                            st.metric("MAPE", f"{mape_val:.2f}%", delta=mape_delta if isinstance(mape_val, (int, float)) else None)
+                            st.metric("MAPE (Средняя абсолютная процентная ошибка)", f"{mape_val:.2f}%", 
+                                     delta=mape_delta if isinstance(mape_val, (int, float)) else None,
+                                     help="Среднее процентное отклонение прогноза от фактических значений")
                         else:
-                            st.metric("MAPE", "N/A", delta="Production mode")
+                            st.metric("MAPE", "N/A", delta="Режим продакшена")
                     
                     # Show quality warnings and recommendations (только если метрики доступны)
                     if isinstance(mape_val, (int, float)):
@@ -492,38 +599,38 @@ if st.session_state.preprocessed_shop_csv:
                             st.success(f"✅ Отличное качество модели! MAPE = {mape_val:.2f}% - модель готова к продакшену.")
                 
                 # Show training info
-                with st.expander("📊 Training Details"):
+                with st.expander("📊 Детали обучения"):
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.write("**Training Period:**")
-                        st.write(f"- Start: {result['train_range']['start'][:10]}")
-                        st.write(f"- End: {result['train_range']['end'][:10]}")
-                        st.write(f"- Samples: {result['n_train']}")
+                        st.write("**Период обучения:**")
+                        st.write(f"- Начало: {result['train_range']['start'][:10]}")
+                        st.write(f"- Конец: {result['train_range']['end'][:10]}")
+                        st.write(f"- Образцов: {result['n_train']}")
                     
                     with col2:
                         if skip_holdout or result.get('test_range', {}).get('start') is None:
-                            st.write("**⚠️ Production Mode:**")
-                            st.write("- Test Period: N/A (skip_holdout=True)")
-                            st.write("- Samples in test: 0")
+                            st.write("**⚠️ Режим продакшена:**")
+                            st.write("- Тестовый период: N/A (skip_holdout=True)")
+                            st.write("- Образцов в тесте: 0")
                             st.info("💡 Модель обучена на всех данных. Готова для прогноза на реальное будущее!")
                         else:
-                            st.write("**Test Period:**")
+                            st.write("**Тестовый период:**")
                             test_start = result.get('test_range', {}).get('start', 'N/A')
                             test_end = result.get('test_range', {}).get('end', 'N/A')
                             if test_start and test_start != 'N/A':
-                                st.write(f"- Start: {test_start[:10] if isinstance(test_start, str) else test_start}")
+                                st.write(f"- Начало: {test_start[:10] if isinstance(test_start, str) else test_start}")
                             if test_end and test_end != 'N/A':
-                                st.write(f"- End: {test_end[:10] if isinstance(test_end, str) else test_end}")
-                            st.write(f"- Samples: {result.get('n_test', 0)}")
+                                st.write(f"- Конец: {test_end[:10] if isinstance(test_end, str) else test_end}")
+                            st.write(f"- Образцов: {result.get('n_test', 0)}")
                     
-                    st.write("**Configuration:**")
+                    st.write("**Конфигурация:**")
                     st.write(f"- Log transform: {metrics.get('log_transform', False)}")
-                    st.write(f"- Interval width: {metrics.get('interval_width', 0.95)}")
-                    st.write(f"- Seasonality mode: {metrics.get('seasonality_mode', 'additive')}")
-                    st.write(f"- Changepoint prior scale: {metrics.get('changepoint_prior_scale', 0.05)}")
-                    st.write(f"- Seasonality prior scale: {metrics.get('seasonality_prior_scale', 10.0)}")
-                    st.write(f"- Used cross-validation: {metrics.get('used_cross_validation', False)}")
-                    st.write(f"- Auto-tune used: {metrics.get('auto_tune', False)}")
+                    st.write(f"- Ширина интервала: {metrics.get('interval_width', 0.95)}")
+                    st.write(f"- Режим сезонности: {metrics.get('seasonality_mode', 'additive')}")
+                    st.write(f"- Гибкость точек изменения: {metrics.get('changepoint_prior_scale', 0.05)}")
+                    st.write(f"- Сила сезонности: {metrics.get('seasonality_prior_scale', 10.0)}")
+                    st.write(f"- Использована кросс-валидация: {metrics.get('used_cross_validation', False)}")
+                    st.write(f"- Использован auto-tune: {metrics.get('auto_tune', False)}")
                 
                 # Show auto-tune results if available (проверяем skip_holdout через metrics)
                 if response.status_code == 200 and metrics.get('auto_tune', False):
@@ -532,7 +639,7 @@ if st.session_state.preprocessed_shop_csv:
                         comparison_csv = "analysis/model_comparison.csv"
                         if os.path.exists(comparison_csv):
                             df_comparison = pd.read_csv(comparison_csv)
-                            st.subheader("📊 Model Comparison (Auto-tune Results)")
+                            st.subheader("📊 Сравнение моделей (Результаты auto-tune)")
                             
                             # Сортировка по MAPE
                             df_comparison_sorted = df_comparison.sort_values('mape')
@@ -555,8 +662,8 @@ if st.session_state.preprocessed_shop_csv:
                                 customdata=df_comparison_sorted['coverage'] * 100
                             ))
                             fig_comparison.update_layout(
-                                title="MAPE Comparison Across Models (Green = Best Model)",
-                                xaxis_title="Model",
+                                title="Сравнение MAPE моделей (Зеленый = Лучшая модель)",
+                                xaxis_title="Модель",
                                 yaxis_title="MAPE (%)",
                                 height=500,
                                 showlegend=False
@@ -575,21 +682,21 @@ if st.session_state.preprocessed_shop_csv:
                             st.info(f"💡 Текущий прогноз использует модель из пути: {model_out_path}. "
                                    f"Для использования другой модели из списка переобучите модель или выберите модель вручную.")
                     except Exception as e:
-                        st.warning(f"Could not load auto-tune comparison results: {str(e)}")
+                        st.warning(f"Не удалось загрузить результаты сравнения auto-tune: {str(e)}")
             else:
-                st.error(f"❌ Training failed: {response.text}")
+                st.error(f"❌ Ошибка обучения: {response.text}")
         except Exception as e:
-            st.error(f"❌ Error training model: {str(e)}")
+            st.error(f"❌ Ошибка при обучении модели: {str(e)}")
     
     # Diagnostics section
     if st.session_state.trained_model_path and st.session_state.preprocessed_shop_csv:
-        st.subheader("🔍 Model Diagnostics")
+        st.subheader("🔍 Диагностика модели")
         
         col1, col2 = st.columns([2, 1])
         with col1:
             st.info("Диагностика модели поможет выявить систематические проблемы: переоценка тренда, низкое покрытие CI, смещение минимумов и др.")
         with col2:
-            if st.button("🔍 Run Diagnostics", help="Запускает полную диагностику модели"):
+            if st.button("🔍 Запустить диагностику", help="Запускает полную диагностику модели"):
                 try:
                     # Получаем include_regressors из метрик, если доступно
                     include_regressors_diag = False
@@ -607,27 +714,30 @@ if st.session_state.preprocessed_shop_csv:
                         "include_regressors": include_regressors_diag
                     }
                     
-                    with st.spinner("Running diagnostics..."):
+                    with st.spinner("Выполняется диагностика..."):
                         response = requests.post(f"{FASTAPI_URL}/diagnose", json=payload, timeout=120)
                     
                     if response.status_code == 200:
                         diagnostics = response.json()
                         st.session_state.diagnostics = diagnostics
                         
-                        st.success("✅ Diagnostics completed!")
+                        st.success("✅ Диагностика завершена!")
                         
                         # Display diagnostics
-                        st.subheader("📊 Diagnostic Results")
+                        st.subheader("📊 Результаты диагностики")
                         
                         metrics_diag = diagnostics.get('metrics', {})
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric("MAPE", f"{metrics_diag.get('mape', 0):.2f}%")
+                            st.metric("MAPE", f"{metrics_diag.get('mape', 0):.2f}%", 
+                                     help="Средняя абсолютная процентная ошибка")
                         with col2:
-                            st.metric("Systematic Bias", f"{metrics_diag.get('systematic_bias', 0):.2f}")
+                            st.metric("Систематическое смещение", f"{metrics_diag.get('systematic_bias', 0):.2f}",
+                                     help="Систематическая ошибка модели (положительное = переоценка, отрицательное = недооценка)")
                         with col3:
                             coverage = diagnostics.get('coverage', {}).get('coverage_rate', 0) * 100
-                            st.metric("CI Coverage", f"{coverage:.1f}%")
+                            st.metric("Покрытие CI", f"{coverage:.1f}%",
+                                     help="Процент фактических значений, попавших в доверительный интервал")
                         
                         # Trend bias
                         trend_bias = diagnostics.get('trend_bias', {})
@@ -642,10 +752,10 @@ if st.session_state.preprocessed_shop_csv:
                         
                         # Residuals analysis
                         residuals = diagnostics.get('residuals_analysis', {})
-                        with st.expander("📈 Residuals Analysis"):
-                            st.write(f"Mean residual: {residuals.get('mean', 0):.2f}")
-                            st.write(f"Std residual: {residuals.get('std', 0):.2f}")
-                            st.write(f"Normality test p-value: {residuals.get('normality_test_pvalue', 0):.4f}")
+                        with st.expander("📈 Анализ остатков"):
+                            st.write(f"Средний остаток: {residuals.get('mean', 0):.2f}")
+                            st.write(f"Стд. откл. остатка: {residuals.get('std', 0):.2f}")
+                            st.write(f"P-value теста на нормальность: {residuals.get('normality_test_pvalue', 0):.4f}")
                             if residuals.get('has_trend', False):
                                 st.warning(f"⚠️ Обнаружен тренд в остатках: slope={residuals.get('trend_slope', 0):.6f}")
                         
@@ -653,7 +763,7 @@ if st.session_state.preprocessed_shop_csv:
                         multicollinearity = diagnostics.get('multicollinearity', {})
                         if multicollinearity.get('has_multicollinearity', False):
                             st.error("🚨 Обнаружена мультиколлинеарность регрессоров!")
-                            st.write(f"Max correlation: {multicollinearity.get('max_correlation', 0):.2f}")
+                            st.write(f"Макс. корреляция: {multicollinearity.get('max_correlation', 0):.2f}")
                             st.write(f"VIF scores: {multicollinearity.get('vif_scores', {})}")
                         
                         # Minima shift
@@ -663,56 +773,56 @@ if st.session_state.preprocessed_shop_csv:
                             st.warning(f"⚠️ Локальные минимумы сдвинуты на {mean_shift:.1f} дней")
                         
                     else:
-                        st.error(f"❌ Diagnostics failed: {response.text}")
+                        st.error(f"❌ Ошибка диагностики: {response.text}")
                 except Exception as e:
-                    st.error(f"❌ Error running diagnostics: {str(e)}")
+                    st.error(f"❌ Ошибка при выполнении диагностики: {str(e)}")
 
 # Evaluate section
-st.header("📊 Step 4: Evaluate Model (Cross-Validation)")
+st.header("📊 Шаг 4: Оценка модели (Кросс-валидация)")
 if st.session_state.preprocessed_shop_csv:
-    with st.expander("🔍 Cross-Validation Configuration", expanded=False):
+    with st.expander("🔍 Конфигурация кросс-валидации", expanded=False):
         col1, col2, col3 = st.columns(3)
         
         with col1:
             initial_days = st.number_input(
-                "Initial training days",
+                "Начальный период обучения (дней)",
                 min_value=30,
                 value=180,
                 step=30,
-                help="Number of days for initial training period in rolling CV"
+                help="Количество дней для начального периода обучения в скользящей кросс-валидации"
             )
         
         with col2:
             horizon_days = st.number_input(
-                "Forecast horizon (days)",
+                "Горизонт прогноза (дней)",
                 min_value=1,
                 value=30,
                 step=5,
-                help="Number of days to forecast ahead in each CV step"
+                help="Количество дней для прогноза в каждом шаге кросс-валидации"
             )
         
         with col3:
             period_days = st.number_input(
-                "Window slide period (days)",
+                "Период сдвига окна (дней)",
                 min_value=1,
                 value=30,
                 step=5,
-                help="Number of days to slide the window forward between CV steps"
+                help="Количество дней, на которое сдвигается окно между шагами кросс-валидации"
             )
         
         cv_include_regressors = st.checkbox(
-            "Use regressors for CV",
+            "Использовать регрессоры для CV",
             value=False,
-            help="Include regressors in cross-validation (must match training configuration)"
+            help="Включить регрессоры в кросс-валидацию (должно совпадать с конфигурацией обучения)"
         )
         
         cv_log_transform = st.checkbox(
-            "Apply log-transform for CV",
+            "Применить log-transform для CV",
             value=False,
-            help="Apply log-transform in cross-validation (must match training configuration)"
+            help="Применить log-transform в кросс-валидации (должно совпадать с конфигурацией обучения)"
         )
     
-    if st.button("📈 Run Cross-Validation", help="Performs rolling cross-validation to evaluate model performance"):
+    if st.button("📈 Запустить кросс-валидацию", help="Выполняет скользящую кросс-валидацию для оценки производительности модели"):
         try:
             payload = {
                 "shop_csv": st.session_state.preprocessed_shop_csv,
@@ -723,17 +833,17 @@ if st.session_state.preprocessed_shop_csv:
                 "log_transform": cv_log_transform
             }
             
-            with st.spinner("Running cross-validation... This may take several minutes."):
+            with st.spinner("Выполняется кросс-валидация... Это может занять несколько минут."):
                 response = requests.post(f"{FASTAPI_URL}/evaluate", json=payload, timeout=600)
             
             if response.status_code == 200:
                 result = response.json()
                 st.session_state.cv_results = result
                 
-                st.success("✅ Cross-validation completed!")
+                st.success("✅ Кросс-валидация завершена!")
                 
                 # Display aggregate metrics
-                st.subheader("📊 Cross-Validation Results")
+                st.subheader("📊 Результаты кросс-валидации")
                 
                 metrics = result["metrics"]
                 summary = result["summary"]
@@ -746,8 +856,8 @@ if st.session_state.preprocessed_shop_csv:
                 with col3:
                     st.metric("MAPE", f"{summary['mape_mean']:.2f}%", f"±{summary['mape_std']:.2f}%")
                 
-                st.info(f"📊 Number of CV steps: {result['n_cv_steps']}")
-                st.info(f"💾 Predictions saved to: {result['cv_predictions_csv']}")
+                st.info(f"📊 Количество шагов CV: {result['n_cv_steps']}")
+                st.info(f"💾 Прогнозы сохранены в: {result['cv_predictions_csv']}")
                 
                 # Plot CV results
                 try:
@@ -762,7 +872,7 @@ if st.session_state.preprocessed_shop_csv:
                         x=df_cv['ds'],
                         y=df_cv['actual'],
                         mode='lines+markers',
-                        name='Actual Sales',
+                        name='Фактические продажи',
                         line=dict(color='blue', width=2),
                         marker=dict(size=4)
                     ))
@@ -775,7 +885,7 @@ if st.session_state.preprocessed_shop_csv:
                                 x=step_data['ds'],
                                 y=step_data['predicted'],
                                 mode='lines+markers',
-                                name=f'Predictions (Step {step})',
+                                name=f'Прогнозы (Шаг {step})',
                                 line=dict(color='red', width=1, dash='dash'),
                                 marker=dict(size=3)
                             ))
@@ -784,15 +894,15 @@ if st.session_state.preprocessed_shop_csv:
                             x=df_cv['ds'],
                             y=df_cv['predicted'],
                             mode='lines+markers',
-                            name='Predictions',
+                            name='Прогнозы',
                             line=dict(color='red', width=1, dash='dash'),
                             marker=dict(size=3)
                         ))
                     
                     fig.update_layout(
-                        title="Cross-Validation Results: Actual vs Predicted",
-                        xaxis_title="Date",
-                        yaxis_title="Sales",
+                        title="Результаты кросс-валидации: Фактические vs Прогнозируемые",
+                        xaxis_title="Дата",
+                        yaxis_title="Продажи",
                         hovermode='x unified',
                         height=500,
                         showlegend=True
@@ -800,21 +910,21 @@ if st.session_state.preprocessed_shop_csv:
                     
                     st.plotly_chart(fig, use_container_width=True)
                 except Exception as e:
-                    st.warning(f"Could not plot CV results: {str(e)}")
+                    st.warning(f"Не удалось построить график результатов CV: {str(e)}")
                 
             else:
-                st.error(f"❌ Cross-validation failed: {response.text}")
+                st.error(f"❌ Ошибка кросс-валидации: {response.text}")
         except Exception as e:
-            st.error(f"❌ Error running cross-validation: {str(e)}")
+            st.error(f"❌ Ошибка при выполнении кросс-валидации: {str(e)}")
 
 # Predict section
-st.header("🔮 Step 5: Generate Forecast")
+st.header("🔮 Шаг 5: Генерация прогноза")
 st.info("💡 **Прогноз на будущее:** Если модель была обучена с 'skip_holdout=True', прогноз будет сделан на даты **после** последней даты в обучающих данных. "
        "Для использования сохраненной модели укажите путь к `.pkl` файлу ниже.")
 
 if st.session_state.trained_model_path:
     # Показываем информацию о текущей модели
-    model_info = f"🤖 Using model: `{st.session_state.trained_model_path}`"
+    model_info = f"🤖 Используется модель: `{st.session_state.trained_model_path}`"
     
     # Показываем предупреждение если модель обучена с skip_holdout
     if st.session_state.training_metrics and st.session_state.training_metrics.get('skip_holdout', False):
@@ -839,7 +949,7 @@ else:
             st.session_state.trained_model_path = saved_model_path
             st.session_state.saved_model_path = saved_model_path  # Сохраняем в session_state
             st.success(f"✅ Модель загружена: {saved_model_path}")
-            model_info = f"🤖 Using saved model: `{saved_model_path}`"
+            model_info = f"🤖 Используется сохраненная модель: `{saved_model_path}`"
             
             # Проверяем, требует ли модель регрессоры
             try:
@@ -888,18 +998,18 @@ if st.session_state.trained_model_path:
     
     with col1:
         horizon = st.number_input(
-            "Forecast horizon (days)",
+            "Горизонт прогноза (дней)",
             min_value=1,
             max_value=365,
             value=30,
             step=1,
-            help="Number of days to forecast into the future"
+            help="Количество дней для прогноза в будущее"
         )
         
         log_transform_predict = st.checkbox(
-            "Apply log-transform (inverse)",
+            "Применить log-transform (обратное)",
             value=st.session_state.training_metrics.get('log_transform', False) if st.session_state.training_metrics else False,
-            help="Apply inverse log1p transformation to predictions (should match training setting)"
+            help="Применить обратное преобразование log1p к прогнозам (должно совпадать с настройкой обучения)"
         )
         
         smooth_transition = st.checkbox(
@@ -928,16 +1038,16 @@ if st.session_state.trained_model_path:
                 pass  # Если не можем загрузить, продолжаем
         
         regressor_strategy = st.selectbox(
-            "Regressor fill strategy",
+            "Стратегия заполнения регрессоров",
             options=["ffill", "median"],
-            help="Strategy for filling regressors on future dates: 'ffill' uses last known values, 'median' uses median",
+            help="Стратегия заполнения регрессоров на будущие даты: 'ffill' использует последние известные значения, 'median' использует медиану",
             disabled=not model_requires_regressors  # Отключаем, если регрессоры не нужны
         )
         
         regressors_csv = st.text_input(
-            "Regressors CSV (optional)",
+            "CSV с регрессорами (опционально)",
             value=regressors_csv_value,
-            help="Path to CSV with regressors (avg_price, avg_discount). Обязательно, если модель использует регрессоры!",
+            help="Путь к CSV файлу с регрессорами (avg_price, avg_discount). Обязательно, если модель использует регрессоры!",
             disabled=not model_requires_regressors  # Отключаем, если регрессоры не нужны
         )
         
@@ -996,7 +1106,7 @@ if st.session_state.trained_model_path:
         smooth_alpha = 0.6
         max_change_pct = 0.015
     
-    if st.button("🔮 Generate Forecast", help="Generates forecast for the specified horizon"):
+    if st.button("🔮 Сгенерировать прогноз", help="Генерирует прогноз на указанный горизонт"):
         # Проверяем, требует ли модель регрессоры перед отправкой запроса
         if model_requires_regressors and not regressors_csv:
             st.error("❌ **Ошибка**: Модель требует регрессоры, но CSV файл не указан. Пожалуйста, укажите путь к CSV с колонками avg_price и avg_discount.")
@@ -1021,7 +1131,7 @@ if st.session_state.trained_model_path:
                 "max_change_pct": max_change_pct / 100.0
             }
             
-            with st.spinner("Generating forecast..."):
+            with st.spinner("Генерация прогноза..."):
                 response = requests.post(f"{FASTAPI_URL}/predict", json=payload, timeout=120)
             
             if response.status_code == 200:
@@ -1029,11 +1139,11 @@ if st.session_state.trained_model_path:
                 st.session_state.forecast_data = result["forecast"]
                 st.session_state.forecast_csv_path = result["forecast_csv_path"]
                 st.session_state.log_transform_used = log_transform_predict
-                st.success(f"✅ Forecast generated successfully! ({result['n_predictions']} predictions)")
+                st.success(f"✅ Прогноз успешно сгенерирован! ({result['n_predictions']} прогнозов)")
             else:
-                st.error(f"❌ Prediction failed: {response.text}")
+                st.error(f"❌ Ошибка генерации прогноза: {response.text}")
         except Exception as e:
-            st.error(f"❌ Error generating forecast: {str(e)}")
+            st.error(f"❌ Ошибка при генерации прогноза: {str(e)}")
     
     # Display forecast visualization and table if forecast data exists
     if st.session_state.forecast_data is not None and st.session_state.forecast_csv_path is not None:
@@ -1045,19 +1155,19 @@ if st.session_state.trained_model_path:
         if 'yhat' in df_forecast.columns:
             n_neg = (df_forecast['yhat'] < 0).sum()
             if n_neg > 0:
-                st.warning(f"⚠️ Found {n_neg} negative forecast values, clamping to 0")
+                st.warning(f"⚠️ Найдено {n_neg} отрицательных значений прогноза, обрезано до 0")
                 df_forecast['yhat'] = df_forecast['yhat'].clip(lower=0.0)
         
         if 'yhat_lower' in df_forecast.columns:
             n_neg = (df_forecast['yhat_lower'] < 0).sum()
             if n_neg > 0:
-                st.warning(f"⚠️ Found {n_neg} negative lower bounds, clamping to 0")
+                st.warning(f"⚠️ Найдено {n_neg} отрицательных нижних границ, обрезано до 0")
                 df_forecast['yhat_lower'] = df_forecast['yhat_lower'].clip(lower=0.0)
         
         if 'yhat_upper' in df_forecast.columns:
             n_neg = (df_forecast['yhat_upper'] < 0).sum()
             if n_neg > 0:
-                st.warning(f"⚠️ Found {n_neg} negative upper bounds, clamping to 0")
+                st.warning(f"⚠️ Найдено {n_neg} отрицательных верхних границ, обрезано до 0")
                 df_forecast['yhat_upper'] = df_forecast['yhat_upper'].clip(lower=0.0)
         
         # Ensure yhat_upper >= yhat_lower
@@ -1065,7 +1175,26 @@ if st.session_state.trained_model_path:
             df_forecast['yhat_upper'] = df_forecast[['yhat_upper', 'yhat_lower']].max(axis=1)
         
         # Plot forecast
-        st.subheader("📈 Forecast Visualization")
+        st.subheader("📈 Визуализация прогноза")
+        
+        # Добавляем пояснения к столбцам прогноза
+        with st.expander("📚 Пояснения к столбцам прогноза", expanded=False):
+            st.write("""
+            **Столбцы в таблице прогноза:**
+            
+            - **ds** - Дата прогноза
+            
+            - **yhat** - Прогнозируемое значение продаж (основной прогноз модели)
+            
+            - **yhat_lower** - Нижняя граница доверительного интервала (для указанного уровня уверенности)
+            
+            - **yhat_upper** - Верхняя граница доверительного интервала
+            
+            **Интерпретация:**
+            - **yhat** - это наиболее вероятное значение продаж на указанную дату
+            - Интервал [yhat_lower, yhat_upper] показывает диапазон, в который с заданной вероятностью (например, 95%) попадут фактические значения
+            - Чем уже интервал, тем увереннее модель в своем прогнозе
+            """)
         
         # Load history if available
         df_history = None
@@ -1112,7 +1241,7 @@ if st.session_state.trained_model_path:
                 x=df_history_train['ds'],
                 y=df_history_train['y'],
                 mode='lines',
-                name='Historical Sales (Training Period)',
+                name='Исторические продажи (период обучения)',
                 line=dict(color='blue', width=2)
             ))
         
@@ -1122,7 +1251,7 @@ if st.session_state.trained_model_path:
                 x=df_history_test['ds'],
                 y=df_history_test['y'],
                 mode='lines',
-                name='Actual Sales (Test Period)',
+                name='Фактические продажи (тестовый период)',
                 line=dict(color='green', width=2, dash='dash')
             ))
         
@@ -1131,7 +1260,7 @@ if st.session_state.trained_model_path:
             x=df_forecast['ds'],
             y=df_forecast['yhat'],
             mode='lines',
-            name='Forecast (Future)',
+            name='Прогноз (будущее)',
             line=dict(color='red', width=2)
         ))
         
@@ -1152,19 +1281,19 @@ if st.session_state.trained_model_path:
                 line=dict(width=0),
                 fill='tonexty',
                 fillcolor='rgba(255, 0, 0, 0.2)',
-                name='Confidence Interval',
+                name='Доверительный интервал',
                 showlegend=True,
                 hoverinfo='skip'
             ))
         
-        title = "Sales Forecast"
+        title = "Прогноз продаж"
         if st.session_state.get('log_transform_used', False):
-            title += " (Log Transform Applied)"
+            title += " (Применен Log Transform)"
         
         fig.update_layout(
             title=title,
-            xaxis_title="Date",
-            yaxis_title="Sales",
+            xaxis_title="Дата",
+            yaxis_title="Продажи",
             hovermode='x unified',
             height=500,
             showlegend=True
@@ -1173,36 +1302,36 @@ if st.session_state.trained_model_path:
         st.plotly_chart(fig, use_container_width=True)
         
         # Display forecast table
-        st.subheader("📋 Forecast Table")
+        st.subheader("📋 Таблица прогноза")
         st.dataframe(df_forecast, use_container_width=True)
         
         # Download PDF section
-        st.subheader("📥 Download PDF Report")
+        st.subheader("📥 Скачать PDF отчет")
         
         # Button to generate PDF
-        if st.button("📥 Generate PDF Report", help="Generates a PDF report with forecast visualization and statistics"):
+        if st.button("📥 Сгенерировать PDF отчет", help="Генерирует PDF отчет с визуализацией прогноза и статистикой"):
             try:
                 params = {"path": st.session_state.forecast_csv_path}
-                with st.spinner("Generating PDF report..."):
+                with st.spinner("Генерация PDF отчета..."):
                     response = requests.get(f"{FASTAPI_URL}/forecast/download", params=params, timeout=120)
                 
                 if response.status_code == 200:
                     st.session_state.pdf_data = response.content
                     st.session_state.pdf_filename = "forecast_report.pdf"
-                    st.success("✅ PDF report generated! Click the download button below.")
+                    st.success("✅ PDF отчет сгенерирован! Нажмите кнопку скачивания ниже.")
                 else:
-                    st.error(f"❌ PDF generation failed: {response.text}")
+                    st.error(f"❌ Ошибка генерации PDF: {response.text}")
                     st.session_state.pdf_data = None
                     st.session_state.pdf_filename = None
             except Exception as e:
-                st.error(f"❌ Error generating PDF: {str(e)}")
+                st.error(f"❌ Ошибка при генерации PDF: {str(e)}")
                 st.session_state.pdf_data = None
                 st.session_state.pdf_filename = None
         
         # Show download button if PDF data is available
         if st.session_state.pdf_data is not None:
             st.download_button(
-                label="💾 Download PDF",
+                label="💾 Скачать PDF",
                 data=st.session_state.pdf_data,
                 file_name=st.session_state.pdf_filename,
                 mime="application/pdf",
