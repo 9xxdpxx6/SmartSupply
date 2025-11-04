@@ -2,7 +2,7 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 import logging
 import os
 
@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
-def _improve_data_quality(df: pd.DataFrame) -> pd.DataFrame:
+def _improve_data_quality(df: pd.DataFrame, aggressive: bool = False) -> pd.DataFrame:
     """
     Улучшает качество данных:
     - Заменяет нулевые значения на медиану соседних дней
@@ -20,6 +20,7 @@ def _improve_data_quality(df: pd.DataFrame) -> pd.DataFrame:
     
     Args:
         df: DataFrame с колонками 'ds' и 'y'
+        aggressive: Если True, применяет более агрессивную обработку для очень разреженных данных
         
     Returns:
         Улучшенный DataFrame
@@ -27,36 +28,67 @@ def _improve_data_quality(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df = df.sort_values('ds').reset_index(drop=True)
     
+    # Проверяем процент нулей
+    zero_count = (df['y'] == 0).sum()
+    zero_percent = (zero_count / len(df)) * 100 if len(df) > 0 else 0
+    
     # 1. Обработка нулевых значений
-    zero_mask = df['y'] == 0
-    zero_count = zero_mask.sum()
     if zero_count > 0:
-        logger.info(f"Replacing {zero_count} zero values with median of neighboring days...")
-        for idx in df[zero_mask].index:
-            window_start = max(0, idx - 3)
-            window_end = min(len(df), idx + 4)
+        logger.info(f"Replacing {zero_count} zero values ({zero_percent:.1f}%) with median of neighboring days...")
+        
+        # Для агрессивного режима используем более широкое окно
+        window_size = 7 if aggressive and zero_percent > 50 else 3
+        
+        for idx in df[df['y'] == 0].index:
+            window_start = max(0, idx - window_size)
+            window_end = min(len(df), idx + window_size + 1)
             window = df.iloc[window_start:window_end]
             window_nonzero = window[window['y'] > 0]['y']
+            
             if len(window_nonzero) > 0:
+                # Используем медиану для более стабильного значения
                 replacement = window_nonzero.median()
                 df.loc[idx, 'y'] = replacement
             else:
-                # Если все окно нули, используем общую медиану
-                df.loc[idx, 'y'] = df[df['y'] > 0]['y'].median()
+                # Если все окно нули, используем общую медиану или среднее
+                if len(df[df['y'] > 0]) > 0:
+                    # Для агрессивного режима используем более низкий процентиль
+                    if aggressive and zero_percent > 70:
+                        replacement = df[df['y'] > 0]['y'].quantile(0.25)  # Нижний квартиль
+                    else:
+                        replacement = df[df['y'] > 0]['y'].median()
+                    df.loc[idx, 'y'] = replacement
+                else:
+                    # Если все нули, оставляем как есть (но это крайний случай)
+                    logger.warning(f"All values are zero at index {idx}, cannot replace")
     
-    # 2. Winsorization (обработка выбросов)
-    Q1 = df['y'].quantile(0.05)
-    Q3 = df['y'].quantile(0.95)
+    # 2. Winsorization (обработка выбросов) - более мягкая для агрессивного режима
+    if aggressive and zero_percent > 50:
+        # Для очень разреженных данных используем более мягкие границы
+        Q1 = df['y'].quantile(0.01)  # 1st percentile вместо 5th
+        Q3 = df['y'].quantile(0.99)  # 99th percentile вместо 95th
+    else:
+        Q1 = df['y'].quantile(0.05)
+        Q3 = df['y'].quantile(0.95)
+    
     outliers = (df['y'] < Q1) | (df['y'] > Q3)
     outlier_count = outliers.sum()
     if outlier_count > 0:
-        logger.info(f"Winsorizing {outlier_count} outliers (clipping to 5th and 95th percentiles)...")
+        logger.info(f"Winsorizing {outlier_count} outliers (clipping to {Q1:.2f} and {Q3:.2f})...")
         df.loc[df['y'] < Q1, 'y'] = Q1
         df.loc[df['y'] > Q3, 'y'] = Q3
     
-    # 3. Скользящее среднее для стабилизации (7 дней)
-    logger.info("Applying 7-day moving average for data stabilization...")
-    df['y'] = df['y'].rolling(window=7, center=True, min_periods=1).mean()
+    # 3. Скользящее среднее для стабилизации
+    # Для агрессивного режима используем более широкое окно
+    window_days = 14 if aggressive and zero_percent > 50 else 7
+    logger.info(f"Applying {window_days}-day moving average for data stabilization...")
+    df['y'] = df['y'].rolling(window=window_days, center=True, min_periods=1).mean()
+    
+    # 4. Дополнительное сглаживание для очень разреженных данных
+    if aggressive and zero_percent > 60:
+        logger.info("Applying additional exponential smoothing for highly sparse data...")
+        # Применяем экспоненциальное сглаживание с высоким alpha
+        df['y'] = df['y'].ewm(span=7, adjust=False).mean()
     
     return df
 
@@ -97,6 +129,7 @@ def parse_and_process(
     raw_csv_path: str, 
     out_shop_csv: str, 
     out_category_csv: str, 
+    out_product_csv: Optional[str] = None,
     force_weekly: bool = False
 ) -> Dict[str, Any]:
     """
@@ -460,12 +493,103 @@ def parse_and_process(
     # Normalize path for cross-platform compatibility
     out_category_csv = os.path.normpath(out_category_csv)
     
+    # Применяем улучшение качества данных для категорий
+    logger.info("Applying data quality improvements to category data...")
+    category_level_sorted = category_level.sort_values(['category', 'ds']).reset_index(drop=True)
+    category_level_improved = []
+    
+    for cat in category_level_sorted['category'].unique():
+        cat_df = category_level_sorted[category_level_sorted['category'] == cat][['ds', 'y']].copy()
+        zero_percent = (cat_df['y'] == 0).sum() / len(cat_df) * 100 if len(cat_df) > 0 else 0
+        
+        if zero_percent > 30:
+            # Применяем агрессивную обработку для разреженных категорий
+            cat_df = _improve_data_quality(cat_df, aggressive=(zero_percent > 50))
+            logger.info(f"  Improved data quality for category '{cat}': {zero_percent:.1f}% zeros")
+        
+        cat_df['category'] = cat
+        category_level_improved.append(cat_df)
+    
+    if category_level_improved:
+        category_level = pd.concat(category_level_improved, ignore_index=True)
+        category_level = category_level[['category', 'ds', 'y']].sort_values(['category', 'ds']).reset_index(drop=True)
+        logger.info(f"Data quality improvements applied to {len(category_level_improved)} categories")
+    
     try:
         category_level.to_csv(out_category_csv, index=False)
     except Exception as e:
         logger.error(f"Error saving category CSV to {out_category_csv}: {str(e)}", exc_info=True)
         raise ValueError(f"Failed to save category-level CSV: {str(e)}")
     logger.info(f"Category-level data saved to: {out_category_csv} ({len(category_level)} rows)")
+    
+    # Aggregate to product-level (if output path provided)
+    product_level = pd.DataFrame()
+    if out_product_csv is not None:
+        logger.info("Aggregating product-level data...")
+        
+        try:
+            if freq_used == 'W':
+                df['ds_week'] = df['ds'].dt.to_period('W-MON').dt.start_time
+                product_level = df.groupby(['product_id', 'ds_week']).agg({'y': 'sum'}).reset_index()
+                product_level.columns = ['product_id', 'ds', 'y']
+            else:
+                product_level = df.groupby(['product_id', 'ds']).agg({'y': 'sum'}).reset_index()
+        except Exception as e:
+            logger.error(f"Error during product-level aggregation: {str(e)}", exc_info=True)
+            raise ValueError(f"Failed to aggregate product-level data: {str(e)}")
+        
+        # Ensure continuous date range for each product
+        if not product_level.empty:
+            try:
+                all_products = product_level['product_id'].unique()
+                
+                prod_date_min = product_level['ds'].min()
+                prod_date_max = product_level['ds'].max()
+                
+                if pd.isna(prod_date_min) or pd.isna(prod_date_max):
+                    raise ValueError("Invalid dates in product-level data")
+                
+                if freq_used == 'W':
+                    all_dates = pd.date_range(
+                        start=prod_date_min,
+                        end=prod_date_max,
+                        freq='W-MON'
+                    )
+                else:
+                    all_dates = pd.date_range(
+                        start=prod_date_min,
+                        end=prod_date_max,
+                        freq='D'
+                    )
+                
+                # Create complete index
+                full_index = pd.MultiIndex.from_product(
+                    [all_products, all_dates],
+                    names=['product_id', 'ds']
+                )
+                
+                # Reindex and fill missing values with 0
+                product_level = product_level.set_index(['product_id', 'ds']).reindex(
+                    full_index, fill_value=0
+                ).reset_index()
+            except Exception as e:
+                logger.error(f"Error during product-level date range filling: {str(e)}", exc_info=True)
+                raise ValueError(f"Failed to create continuous date range for products: {str(e)}")
+        
+        # Ensure output directory exists and normalize paths
+        product_dir = os.path.dirname(out_product_csv)
+        if product_dir:
+            os.makedirs(product_dir, exist_ok=True)
+        
+        # Normalize path for cross-platform compatibility
+        out_product_csv = os.path.normpath(out_product_csv)
+        
+        try:
+            product_level.to_csv(out_product_csv, index=False)
+        except Exception as e:
+            logger.error(f"Error saving product CSV to {out_product_csv}: {str(e)}", exc_info=True)
+            raise ValueError(f"Failed to save product-level CSV: {str(e)}")
+        logger.info(f"Product-level data saved to: {out_product_csv} ({len(product_level)} rows)")
     
     # Prepare stats (ensure all values are JSON-serializable)
     stats = {
@@ -481,17 +605,23 @@ def parse_and_process(
         'unique_products': int(df['product_id'].nunique()),
         'shop_data_rows': int(len(shop_level)),
         'category_data_rows': int(len(category_level)),
+        'product_data_rows': int(len(product_level)) if out_product_csv is not None else 0,
         'warning': stats_warning
     }
     
     logger.info("Preprocessing completed successfully")
     logger.info(f"Stats: {stats}")
     
-    return {
+    result = {
         'shop_csv': out_shop_csv,
         'category_csv': out_category_csv,
         'stats': stats
     }
+    
+    if out_product_csv is not None:
+        result['product_csv'] = out_product_csv
+    
+    return result
 
 
 if __name__ == "__main__":

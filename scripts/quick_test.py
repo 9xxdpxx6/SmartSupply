@@ -6,3 +6,4 @@ print(f'Mean: {df["y"].mean():.2f}')
 print(f'First 10 values:')
 print(df[['ds', 'y']].head(10))
 
+

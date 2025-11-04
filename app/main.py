@@ -11,6 +11,7 @@ from app.predict import predict_prophet, save_forecast_csv
 from app.evaluation import rolling_cross_validation_prophet
 from app.utils import export_report_pdf
 from app.diagnostics import diagnose_model, save_diagnostics
+from app.category_forecast import distribute_shop_forecast_to_categories, get_category_forecast_by_name
 import pandas as pd
 import pandas.errors
 
@@ -50,6 +51,8 @@ class TrainRequest(BaseModel):
     seasonality_mode: Literal["additive", "multiplicative"] = "additive"
     auto_tune: bool = False
     skip_holdout: bool = False  # Если True, использует ВСЕ данные для обучения (без теста)
+    filter_column: Optional[Literal["category", "product_id"]] = None  # Фильтр по категории или товару
+    filter_value: Optional[str] = None  # Значение для фильтрации (название категории или ID товара)
 
 
 class PredictRequest(BaseModel):
@@ -76,6 +79,7 @@ class EvaluateRequest(BaseModel):
 class PreprocessResponse(BaseModel):
     shop_csv: str
     category_csv: str
+    product_csv: Optional[str] = None
     stats: dict
     aggregation_suggestion: dict  # freq: 'D' or 'W', reason: str
 
@@ -88,6 +92,21 @@ class TrainResponse(BaseModel):
     test_range: dict
     n_train: int
     n_test: int
+
+
+class CategoryForecastRequest(BaseModel):
+    shop_forecast_csv: str
+    category_csv: str
+    horizon_days: int = Field(default=90, ge=1, le=365)
+    category_name: Optional[str] = None  # Если указано, возвращает только эту категорию
+
+
+class CategoryForecastResponse(BaseModel):
+    forecast: list
+    forecast_csv_path: str
+    n_predictions: int
+    n_categories: Optional[int] = None  # Количество категорий
+    method: str = "distributed_from_shop"
 
 
 class PredictResponse(BaseModel):
@@ -157,16 +176,19 @@ async def preprocess_data(request: PreprocessRequest):
         base_name = os.path.splitext(os.path.basename(normalized_input_path))[0]
         out_shop_csv = os.path.join("data/processed", f"{base_name}_shop.csv")
         out_category_csv = os.path.join("data/processed", f"{base_name}_category.csv")
+        out_product_csv = os.path.join("data/processed", f"{base_name}_product.csv")
         
         # Normalize output paths
         out_shop_csv = os.path.normpath(out_shop_csv)
         out_category_csv = os.path.normpath(out_category_csv)
+        out_product_csv = os.path.normpath(out_product_csv)
         
         # Call the preprocessing function
         result = parse_and_process(
             normalized_input_path, 
             out_shop_csv, 
             out_category_csv,
+            out_product_csv=out_product_csv,
             force_weekly=request.force_weekly
         )
         
@@ -182,6 +204,7 @@ async def preprocess_data(request: PreprocessRequest):
         # Normalize paths for JSON response (use forward slashes for cross-platform compatibility)
         shop_csv_normalized = result["shop_csv"].replace("\\", "/")
         category_csv_normalized = result["category_csv"].replace("\\", "/")
+        product_csv_normalized = result.get("product_csv", "").replace("\\", "/") if result.get("product_csv") else None
         
         # Ensure stats are fully JSON-serializable
         import json
@@ -190,6 +213,7 @@ async def preprocess_data(request: PreprocessRequest):
         return PreprocessResponse(
             shop_csv=shop_csv_normalized,
             category_csv=category_csv_normalized,
+            product_csv=product_csv_normalized,
             stats=stats_serialized,
             aggregation_suggestion=aggregation_suggestion
         )
@@ -246,7 +270,9 @@ async def train_model(request: TrainRequest):
             seasonality_prior_scale=request.seasonality_prior_scale,
             seasonality_mode=request.seasonality_mode,
             auto_tune=request.auto_tune,
-            skip_holdout=getattr(request, 'skip_holdout', False)
+            skip_holdout=getattr(request, 'skip_holdout', False),
+            filter_column=request.filter_column,
+            filter_value=request.filter_value
         )
         
         metrics_path = request.model_out.replace('.pkl', '_metrics.json')
@@ -597,6 +623,235 @@ async def diagnose_model_endpoint(request: DiagnoseRequest):
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "message": "Sales Forecasting API is running"}
+
+
+@app.post("/predict_category_distributed", response_model=CategoryForecastResponse)
+async def predict_category_distributed(request: CategoryForecastRequest):
+    """
+    Альтернативный подход для прогнозирования категорий:
+    распределяет shop-level прогноз по категориям пропорционально их историческим долям.
+    
+    Это решение для случаев, когда Prophet плохо работает с разреженными данными категорий.
+    Использует проверенный shop-level прогноз и распределяет его пропорционально.
+    """
+    try:
+        # Проверяем наличие файлов
+        if not os.path.exists(request.shop_forecast_csv):
+            raise HTTPException(status_code=404, detail=f"Shop forecast CSV not found: {request.shop_forecast_csv}")
+        if not os.path.exists(request.category_csv):
+            raise HTTPException(status_code=404, detail=f"Category CSV not found: {request.category_csv}")
+        
+        logger.info("=" * 80)
+        logger.info("ИСПОЛЬЗУЕМ АЛЬТЕРНАТИВНЫЙ ПОДХОД: Распределение shop-level прогноза по категориям")
+        logger.info(f"Shop forecast: {request.shop_forecast_csv}")
+        logger.info(f"Category history: {request.category_csv}")
+        logger.info("=" * 80)
+        
+        # Распределяем прогноз
+        output_csv = "data/processed/forecast_category_distributed.csv"
+        distributed_forecast = distribute_shop_forecast_to_categories(
+            shop_forecast_csv=request.shop_forecast_csv,
+            category_csv=request.category_csv,
+            horizon_days=request.horizon_days,
+            output_csv=output_csv
+        )
+        
+        # Если указана конкретная категория, фильтруем
+        if request.category_name:
+            filtered_forecast = distributed_forecast[distributed_forecast['category'] == request.category_name]
+            if len(filtered_forecast) == 0:
+                available = distributed_forecast['category'].unique().tolist()
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Category '{request.category_name}' not found. Available: {available}"
+                )
+            distributed_forecast = filtered_forecast
+        
+        # Конвертируем в список словарей, включая категорию
+        forecast_list = distributed_forecast[['category', 'ds', 'yhat', 'yhat_lower', 'yhat_upper']].to_dict('records')
+        
+        # Конвертируем даты в строки
+        for item in forecast_list:
+            if isinstance(item['ds'], pd.Timestamp):
+                item['ds'] = item['ds'].isoformat()
+        
+        logger.info(f"Category forecast generated: {len(forecast_list)} predictions for {distributed_forecast['category'].nunique()} categories")
+        
+        # Подсчитываем количество категорий
+        n_categories = distributed_forecast['category'].nunique()
+        
+        return CategoryForecastResponse(
+            forecast=forecast_list,
+            forecast_csv_path=output_csv,
+            n_predictions=len(forecast_list),
+            n_categories=n_categories,  # Добавляем количество категорий
+            method="distributed_from_shop"
+        )
+        
+    except FileNotFoundError as e:
+        logger.error(f"File not found: {str(e)}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error during category forecast distribution: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error during category forecast distribution: {str(e)}")
+
+
+@app.get("/categories")
+async def get_categories(
+    category_csv: Optional[str] = Query(None, description="Path to preprocessed category CSV file"),
+    raw_csv: Optional[str] = Query(None, description="Path to raw CSV file with actual transactions")
+):
+    """
+    Get list of available categories with record counts.
+    If raw_csv is provided, counts real transactions from raw file.
+    Otherwise, uses preprocessed category_csv file.
+    """
+    try:
+        # Priority: use raw_csv if provided (for real transaction counts)
+        if raw_csv:
+            if not os.path.exists(raw_csv):
+                raise HTTPException(status_code=404, detail=f"Raw CSV file not found: {raw_csv}")
+            
+            logger.info(f"Loading categories from raw CSV: {raw_csv}")
+            df = pd.read_csv(raw_csv, low_memory=False)
+            
+            # Check for category column (handle both old and new formats)
+            if 'category' not in df.columns and 'Product_Category' in df.columns:
+                df['category'] = df['Product_Category']
+            elif 'category' not in df.columns:
+                raise HTTPException(status_code=400, detail="Raw CSV file must contain 'category' or 'Product_Category' column")
+            
+            # Count REAL transactions per category (not time points)
+            category_counts = df['category'].value_counts().reset_index()
+            category_counts.columns = ['name', 'count']
+            category_counts = category_counts.sort_values('name')
+            
+            logger.info(f"Found {len(category_counts)} categories with real transaction counts from raw file")
+        else:
+            # Fallback to preprocessed file
+            if not category_csv:
+                raise HTTPException(status_code=400, detail="Either 'category_csv' or 'raw_csv' must be provided")
+            
+            if not os.path.exists(category_csv):
+                raise HTTPException(status_code=404, detail=f"Category CSV file not found: {category_csv}")
+            
+            logger.info(f"Loading categories from preprocessed CSV: {category_csv}")
+            df = pd.read_csv(category_csv)
+            if 'category' not in df.columns:
+                raise HTTPException(status_code=400, detail="CSV file must contain 'category' column")
+            
+            # Calculate counts for each category (these are time points, not transactions)
+            category_counts = df['category'].value_counts().reset_index()
+            category_counts.columns = ['name', 'count']
+            category_counts = category_counts.sort_values('name')
+            
+            logger.info(f"Found {len(category_counts)} categories from preprocessed file (time point counts)")
+        
+        # Convert to list of dicts
+        categories_with_counts = [
+            {"name": row['name'], "count": int(row['count'])} 
+            for _, row in category_counts.iterrows()
+        ]
+        
+        return {
+            "categories": categories_with_counts,
+            "count": len(categories_with_counts),
+            "from_raw": raw_csv is not None
+        }
+    except Exception as e:
+        logger.error(f"Error getting categories: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error getting categories: {str(e)}")
+
+
+@app.get("/products")
+async def get_products(
+    product_csv: Optional[str] = Query(None, description="Path to preprocessed product CSV file"),
+    raw_csv: Optional[str] = Query(None, description="Path to raw CSV file with actual transactions"),
+    limit: int = Query(default=500, ge=1, le=10000, description="Maximum number of products to return")
+):
+    """
+    Get list of available products with record counts.
+    If raw_csv is provided, counts real transactions from raw file.
+    Otherwise, uses preprocessed product_csv file.
+    """
+    try:
+        # Priority: use raw_csv if provided (for real transaction counts)
+        if raw_csv:
+            if not os.path.exists(raw_csv):
+                raise HTTPException(status_code=404, detail=f"Raw CSV file not found: {raw_csv}")
+            
+            logger.info(f"Loading products from raw CSV: {raw_csv}...")
+            df = pd.read_csv(raw_csv, low_memory=False)
+            
+            # Check for product_id column (handle both old and new formats)
+            if 'product_id' not in df.columns:
+                if 'item_id' in df.columns:
+                    df['product_id'] = df['item_id'].astype(str)
+                elif 'Product_ID' in df.columns:
+                    df['product_id'] = df['Product_ID'].astype(str)
+                elif 'sku' in df.columns:
+                    df['product_id'] = df['sku'].astype(str)
+                else:
+                    raise HTTPException(status_code=400, detail="Raw CSV file must contain 'product_id', 'item_id', 'Product_ID', or 'sku' column")
+            
+            logger.info(f"Found {len(df)} total transactions, {df['product_id'].nunique()} unique products")
+            
+            # Calculate counts for each product_id (REAL transactions, not time points)
+            product_counts = df['product_id'].value_counts().reset_index()
+            product_counts.columns = ['name', 'count']
+            # Sort by count descending, then by name for products with same count
+            product_counts = product_counts.sort_values(['count', 'name'], ascending=[False, True])
+            
+            logger.info(f"Calculated real transaction counts for {len(product_counts)} products")
+        else:
+            # Fallback to preprocessed file
+            if not product_csv:
+                raise HTTPException(status_code=400, detail="Either 'product_csv' or 'raw_csv' must be provided")
+            
+            if not os.path.exists(product_csv):
+                raise HTTPException(status_code=404, detail=f"Product CSV file not found: {product_csv}")
+            
+            logger.info(f"Loading products from preprocessed CSV: {product_csv}...")
+            df = pd.read_csv(product_csv)
+            
+            if 'product_id' not in df.columns:
+                raise HTTPException(status_code=400, detail="CSV file must contain 'product_id' column")
+            
+            logger.info(f"Found {len(df)} total records (time points), {df['product_id'].nunique()} unique products")
+            
+            # Calculate counts for each product_id (these are time points, not transactions)
+            product_counts = df['product_id'].value_counts().reset_index()
+            product_counts.columns = ['name', 'count']
+            # Sort by count descending, then by name for products with same count
+            product_counts = product_counts.sort_values(['count', 'name'], ascending=[False, True])
+        
+        # Limit results if too many products
+        total_products = len(product_counts)
+        if total_products > limit:
+            logger.info(f"Limiting results to top {limit} products (out of {total_products} total)")
+            product_counts = product_counts.head(limit)
+        
+        # Convert to list of dicts
+        products_with_counts = [
+            {"name": str(row['name']), "count": int(row['count'])} 
+            for _, row in product_counts.iterrows()
+        ]
+        
+        logger.info(f"Returning {len(products_with_counts)} products")
+        
+        return {
+            "products": products_with_counts,
+            "count": len(products_with_counts),
+            "total_available": total_products,
+            "limited": total_products > limit,
+            "from_raw": raw_csv is not None
+        }
+    except Exception as e:
+        logger.error(f"Error getting products: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error getting products: {str(e)}")
 
 
 # If running as a script, start the server

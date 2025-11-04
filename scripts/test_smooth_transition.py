@@ -150,3 +150,4 @@ if best_strategy:
     print(f"ЛУЧШАЯ СТРАТЕГИЯ: {best_strategy[0]} (MAPE: {best_mape:.2f}%)")
     print(f"{'=' * 80}")
 
+

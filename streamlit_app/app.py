@@ -8,6 +8,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import os
 import json
+import logging
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 
 # Set up the page configuration
@@ -27,6 +31,12 @@ if 'preprocessed_shop_csv' not in st.session_state:
     st.session_state.preprocessed_shop_csv = None
 if 'preprocessed_category_csv' not in st.session_state:
     st.session_state.preprocessed_category_csv = None
+if 'preprocessed_product_csv' not in st.session_state:
+    st.session_state.preprocessed_product_csv = None
+if 'selected_aggregation_level' not in st.session_state:
+    st.session_state.selected_aggregation_level = "shop"
+if 'selected_filter_value' not in st.session_state:
+    st.session_state.selected_filter_value = None
 if 'preprocessing_stats' not in st.session_state:
     st.session_state.preprocessing_stats = None
 if 'trained_model_path' not in st.session_state:
@@ -56,14 +66,40 @@ FASTAPI_URL = os.getenv("FASTAPI_URL", "http://localhost:8888")
 # Sidebar: Health check
 with st.sidebar:
     st.header("Статус API")
+    
+    # Check API health with better error handling
+    api_status = "unknown"
+    api_message = ""
+    
+    # Try to get health status, but don't fail completely
     try:
-        health_response = requests.get(f"{FASTAPI_URL}/health", timeout=5)
+        health_response = requests.get(f"{FASTAPI_URL}/health", timeout=3)
         if health_response.status_code == 200:
-            st.success("✅ Backend API работает")
+            api_status = "healthy"
+            api_message = "✅ Backend API работает"
+            st.success(api_message)
         else:
-            st.error("❌ Backend API не отвечает")
-    except:
-        st.error("❌ Не удалось подключиться к backend API")
+            api_status = "error"
+            api_message = f"⚠️ Backend API вернул код {health_response.status_code}"
+            st.warning(api_message)
+    except requests.exceptions.ConnectionError:
+        api_status = "connection_error"
+        api_message = "⚠️ Не удалось подключиться к API"
+        st.warning(api_message)
+        st.info(f"💡 Убедитесь, что FastAPI запущен на {FASTAPI_URL}")
+        st.info("💡 Запустите: `python -m app.main` или `uvicorn app.main:app --reload --port 8888`")
+    except requests.exceptions.Timeout:
+        api_status = "timeout"
+        api_message = "⏱️ API не отвечает (таймаут)"
+        st.warning(api_message)
+    except Exception as e:
+        api_status = "error"
+        api_message = f"⚠️ Ошибка проверки API: {str(e)[:50]}"
+        st.warning(api_message)
+    
+    # Button to retry health check
+    if st.button("🔄 Проверить снова", help="Повторно проверить статус API"):
+        st.rerun()
     
     st.header("Помощь")
     with st.expander("О приложении"):
@@ -71,7 +107,10 @@ with st.sidebar:
         Это приложение позволяет:
         1. Загружать данные о продажах (CSV)
         2. Обрабатывать и валидировать данные
-        3. Обучать модели прогнозирования Prophet
+        3. Обучать модели прогнозирования Prophet на трех уровнях:
+           - 🏪 По всему магазину (агрегат всех продаж)
+           - 📁 По категориям товаров
+           - 📦 По конкретным товарам (product_id)
         4. Оценивать модели с помощью кросс-валидации
         5. Генерировать прогнозы
         6. Скачивать отчеты в формате PDF
@@ -164,17 +203,33 @@ if st.session_state.uploaded_file_path:
                                   help="Принудительно использовать недельную агрегацию независимо от плотности данных")
     
     if st.button("🔄 Предобработать данные", help="Обрабатывает загруженный CSV, валидирует данные и генерирует агрегаты по магазинам/категориям"):
+        # Check API before processing
+        try:
+            health_check = requests.get(f"{FASTAPI_URL}/health", timeout=3)
+            if health_check.status_code != 200:
+                st.error(f"❌ API недоступен (код {health_check.status_code}). Убедитесь, что FastAPI запущен.")
+                st.stop()
+        except requests.exceptions.ConnectionError:
+            st.error(f"❌ Не удалось подключиться к API на {FASTAPI_URL}")
+            st.info("💡 Запустите FastAPI: `python -m app.main` или `uvicorn app.main:app --reload --port 8888`")
+            st.stop()
+        except Exception as e:
+            st.warning(f"⚠️ Не удалось проверить статус API: {str(e)}")
+            st.info("💡 Продолжаем попытку предобработки...")
+        
         try:
             payload = {
                 "file_path": st.session_state.uploaded_file_path,
                 "force_weekly": force_weekly
             }
-            response = requests.post(f"{FASTAPI_URL}/preprocess", json=payload, timeout=120)
+            with st.spinner("Предобработка данных... Это может занять некоторое время."):
+                response = requests.post(f"{FASTAPI_URL}/preprocess", json=payload, timeout=120)
             
             if response.status_code == 200:
                 result = response.json()
                 st.session_state.preprocessed_shop_csv = result["shop_csv"]
                 st.session_state.preprocessed_category_csv = result["category_csv"]
+                st.session_state.preprocessed_product_csv = result.get("product_csv")
                 st.session_state.preprocessing_stats = result["stats"]
                 
                 st.success("✅ Данные успешно предобработаны!")
@@ -204,21 +259,247 @@ if st.session_state.uploaded_file_path:
                     if agg_suggestion:
                         st.info(f"💡 Рекомендация: {agg_suggestion.get('freq', 'D')} - {agg_suggestion.get('reason', '')}")
                 
+                # Show available aggregation levels
+                if stats.get("unique_categories", 0) > 0 or stats.get("unique_products", 0) > 0:
+                    st.info(f"📊 Доступные уровни агрегации: Магазин (1), Категории ({stats.get('unique_categories', 0)}), Товары ({stats.get('unique_products', 0)})")
+                
                 if stats.get("warning"):
                     st.warning(f"⚠️ {stats['warning']}")
                 
                 # Show detailed stats
                 with st.expander("📋 Детальная статистика"):
                     st.json(stats)
+            elif response.status_code == 404:
+                st.error(f"❌ Файл не найден: {response.text}")
+            elif response.status_code == 400:
+                st.error(f"❌ Ошибка валидации данных: {response.text}")
+                try:
+                    error_detail = response.json().get("detail", response.text)
+                    st.error(f"Детали: {error_detail}")
+                except:
+                    st.error(f"Ответ сервера: {response.text}")
+            elif response.status_code == 500:
+                st.error(f"❌ Внутренняя ошибка сервера: {response.text}")
+                st.info("💡 Проверьте логи FastAPI для подробностей")
             else:
-                st.error(f"❌ Ошибка предобработки: {response.text}")
+                st.error(f"❌ Ошибка предобработки (код {response.status_code}): {response.text}")
+        except requests.exceptions.Timeout:
+            st.error("❌ Таймаут при предобработке (превышено 120 секунд)")
+            st.info("💡 Попробуйте снова или проверьте размер файла")
+        except requests.exceptions.ConnectionError:
+            st.error(f"❌ Потеряно соединение с API во время предобработки")
+            st.info(f"💡 Убедитесь, что FastAPI все еще работает на {FASTAPI_URL}")
         except Exception as e:
             st.error(f"❌ Ошибка при предобработке данных: {str(e)}")
+            st.info("💡 Проверьте, что API запущен и доступен")
 
 # Train section
 st.header("🎯 Шаг 3: Обучение модели")
 if st.session_state.preprocessed_shop_csv:
-    st.info(f"📊 Используются данные магазинов: {st.session_state.preprocessed_shop_csv}")
+    # Level of aggregation selection
+    aggregation_level = st.session_state.selected_aggregation_level
+    with st.expander("📊 Выбор уровня агрегации", expanded=True):
+        aggregation_level = st.radio(
+            "Выберите уровень агрегации для обучения:",
+            options=["shop", "category", "product"],
+            format_func=lambda x: {
+                "shop": "🏪 По всему магазину (агрегат всех продаж)",
+                "category": "📁 По категории товаров",
+                "product": "📦 По конкретному товару"
+            }[x],
+            index=0 if st.session_state.selected_aggregation_level == "shop" else 
+                  1 if st.session_state.selected_aggregation_level == "category" else 2,
+            help="Выберите, на каком уровне делать прогноз: для всего магазина, для категории или для конкретного товара"
+        )
+        st.session_state.selected_aggregation_level = aggregation_level
+    
+    # Filter selection based on aggregation level
+    selected_csv = st.session_state.preprocessed_shop_csv
+    filter_column = None
+    filter_value = None
+    
+    if aggregation_level == "category":
+        selected_csv = st.session_state.preprocessed_category_csv
+        if not selected_csv:
+            st.error("❌ Файл с данными по категориям не найден. Выполните предобработку данных.")
+            st.stop()
+        
+        # Get available categories - use raw CSV if available for real transaction counts
+        try:
+            # Priority: use raw CSV for real transaction counts
+            params = {}
+            if st.session_state.uploaded_file_path:
+                params["raw_csv"] = st.session_state.uploaded_file_path
+            else:
+                params["category_csv"] = selected_csv
+            
+            categories_response = requests.get(
+                f"{FASTAPI_URL}/categories",
+                params=params,
+                timeout=10
+            )
+            if categories_response.status_code == 200:
+                categories_data = categories_response.json()
+                categories_list = categories_data.get("categories", [])
+                
+                if categories_list:
+                    # Format options with counts: "Category Name (123 записей)"
+                    category_options = []
+                    category_dict = {}  # Map display text to actual name
+                    for cat_item in categories_list:
+                        if isinstance(cat_item, dict):
+                            cat_name = cat_item.get("name", "")
+                            cat_count = cat_item.get("count", 0)
+                            display_text = f"{cat_name} ({cat_count} транзакций)"
+                            category_options.append(display_text)
+                            category_dict[display_text] = cat_name
+                        else:
+                            # Fallback for old format (just strings)
+                            category_options.append(cat_item)
+                            category_dict[cat_item] = cat_item
+                    
+                    selected_category_display = st.selectbox(
+                        "Выберите категорию:",
+                        options=category_options,
+                        help="Выберите категорию товаров для обучения модели. Количество в скобках показывает число реальных транзакций (продаж) в исходном датасете."
+                    )
+                    selected_category = category_dict.get(selected_category_display, selected_category_display)
+                    filter_column = "category"
+                    filter_value = selected_category
+                    st.session_state.selected_filter_value = selected_category
+                    
+                    # Extract count for info message
+                    for cat_item in categories_list:
+                        if isinstance(cat_item, dict) and cat_item.get("name") == selected_category:
+                            cat_count = cat_item.get("count", 0)
+                            st.info(f"📁 Будет обучена модель для категории: **{selected_category}** ({cat_count} транзакций в датасете)")
+                            break
+                    else:
+                        st.info(f"📁 Будет обучена модель для категории: **{selected_category}**")
+                else:
+                    st.warning("⚠️ Категории не найдены в данных")
+            else:
+                st.warning("⚠️ Не удалось загрузить список категорий")
+        except Exception as e:
+            st.warning(f"⚠️ Ошибка при загрузке категорий: {str(e)}")
+    
+    elif aggregation_level == "product":
+        selected_csv = st.session_state.preprocessed_product_csv
+        if not selected_csv:
+            st.error("❌ Файл с данными по товарам не найден. Выполните предобработку данных.")
+            st.stop()
+        
+        # Get available products - use raw CSV if available for real transaction counts
+        try:
+            # Priority: use raw CSV for real transaction counts
+            params = {"limit": 500}
+            if st.session_state.uploaded_file_path:
+                params["raw_csv"] = st.session_state.uploaded_file_path
+            else:
+                params["product_csv"] = selected_csv
+            
+            products_response = requests.get(
+                f"{FASTAPI_URL}/products",
+                params=params,
+                timeout=30  # Increased timeout
+            )
+            if products_response.status_code == 200:
+                products_data = products_response.json()
+                products_list = products_data.get("products", [])
+                
+                if products_list:
+                    # Format options with counts: "Product ID (123 записей)"
+                    product_options = []
+                    product_dict = {}  # Map display text to actual product_id
+                    for prod_item in products_list:
+                        if isinstance(prod_item, dict):
+                            prod_id = str(prod_item.get("name", ""))
+                            prod_count = prod_item.get("count", 0)
+                            display_text = f"{prod_id} ({prod_count} транзакций)"
+                            product_options.append(display_text)
+                            product_dict[display_text] = prod_id
+                        else:
+                            # Fallback for old format (just strings)
+                            product_options.append(str(prod_item))
+                            product_dict[str(prod_item)] = str(prod_item)
+                    
+                    # Show products (API already limits to 500 top products by count)
+                    total_available = products_data.get("total_available", len(product_options))
+                    is_limited = products_data.get("limited", False)
+                    
+                    selected_product_display = st.selectbox(
+                        "Выберите товар (product_id):",
+                        options=product_options,
+                        help="Выберите товар для обучения модели. Количество в скобках показывает число реальных транзакций (продаж) в исходном датасете. Товары отсортированы по количеству транзакций (больше = лучше для прогноза)."
+                    )
+                    selected_product = product_dict.get(selected_product_display, selected_product_display)
+                    filter_column = "product_id"
+                    filter_value = str(selected_product)
+                    st.session_state.selected_filter_value = selected_product
+                    
+                    # Extract count for info message
+                    for prod_item in products_list:
+                        if isinstance(prod_item, dict) and str(prod_item.get("name", "")) == str(selected_product):
+                            prod_count = prod_item.get("count", 0)
+                            st.info(f"📦 Будет обучена модель для товара: **{selected_product}** ({prod_count} транзакций в датасете)")
+                            if prod_count < 30:
+                                st.warning(f"⚠️ **Мало данных!** Товар имеет только {prod_count} транзакций. Прогноз может быть неточным. Рекомендуется минимум 30+ транзакций для надежного прогноза.")
+                            break
+                    else:
+                        st.info(f"📦 Будет обучена модель для товара: **{selected_product}**")
+                    
+                    if is_limited:
+                        st.info(f"💡 Показано топ {len(product_options)} товаров (из {total_available} всего). Отсортировано по количеству записей. Для просмотра остальных используйте поиск по ID.")
+                else:
+                    st.warning("⚠️ Товары не найдены в данных")
+            else:
+                st.warning("⚠️ Не удалось загрузить список товаров")
+        except Exception as e:
+            st.warning(f"⚠️ Ошибка при загрузке товаров: {str(e)}")
+    else:
+        # Shop-level обучение
+        st.success("✅ **SHOP-LEVEL ОБУЧЕНИЕ:** Будет обучена модель для всего магазина (агрегат всех продаж)")
+        st.info(f"📊 Используются данные магазинов: `{selected_csv}`")
+        st.info("💡 **Рекомендации для shop-level:**\n"
+                "- ✅ Log-transform: ВКЛЮЧЕНО (рекомендуется)\n"
+                "- ✅ Interval width: 0.95\n"
+                "- ✅ Holdout fraction: 0.20\n"
+                "- ✅ Seasonality mode: additive\n"
+                "- ✅ Changepoint flexibility: 0.01-0.05\n"
+                "- ✅ Seasonality strength: 10.0")
+    
+    # Show category/product specific recommendations
+    if aggregation_level in ["category", "product"]:
+        with st.expander("💡 Специальные рекомендации для категорий/товаров", expanded=True):
+            st.write("""
+            **⚠️ Важно для категорий и товаров:**
+            
+            Прогнозы по категориям/товарам часто получаются слишком циклическими из-за:
+            - Меньшего объема данных по сравнению с shop-level
+            - Большей волатильности
+            - Monthly seasonality может создавать регулярные циклы
+            
+            **Рекомендуемые настройки:**
+            
+            1. ✅ **Гибкость точек изменения**: **0.05-0.15** (вместо 0.01)
+               - Позволяет модели адаптироваться к изменениям
+            
+            2. ✅ **Сила сезонности**: **5.0-7.5** (вместо 10.0)
+               - Меньше переобучения на циклические паттерны
+            
+            3. ✅ **Режим сезонности**: 
+               - **Additive** - если log-transform включен
+               - **Multiplicative** - если log-transform выключен
+            
+            4. ⚠️ **Log-transform**: 
+               - Для weekly агрегации категорий может быть проблематично
+               - Если получаете ошибку "less than 2 rows" - СНИМИТЕ галочку
+            
+            5. ✅ **Автоматический подбор (auto_tune)**: Включите для лучших результатов
+            
+            **Что исправлено автоматически:**
+            - Monthly seasonality использует меньший fourier_order (3 вместо 5) для категорий
+            """)
     
     # Show recommended settings for best results
     with st.expander("💡 Рекомендуемые настройки для лучшего качества", expanded=False):
@@ -293,8 +574,13 @@ if st.session_state.preprocessed_shop_csv:
             log_transform = st.checkbox(
                 "Применить log-transform к целевому показателю",
                 value=False,
-                help="⚠️ РЕКОМЕНДУЕТСЯ для данных с высокой волатильностью! Применяет преобразование log1p к переменной y (полезно для асимметричных данных)"
+                help="⚠️ РЕКОМЕНДУЕТСЯ для данных с высокой волатильностью! Применяет преобразование log1p к переменной y (полезно для асимметричных данных). "
+                     "⚠️ Для категорий с weekly агрегацией может вызвать ошибку 'less than 2 rows' - в таком случае снимите галочку!"
             )
+            
+            # Предупреждение для категорий с weekly агрегацией
+            if aggregation_level in ["category", "product"] and log_transform:
+                st.info("💡 **Для категорий/товаров:** Если получите ошибку 'less than 2 rows', попробуйте снять галочку log-transform.")
         
         with col2:
             interval_width = st.slider(
@@ -318,16 +604,24 @@ if st.session_state.preprocessed_shop_csv:
         # Skip holdout option (для прогноза на будущее)
         skip_holdout = st.checkbox(
             "🚀 Обучить на ВСЕХ данных (пропустить holdout) - для прогноза на будущее",
-            value=False,
+            value=False if aggregation_level == "shop" else True,  # Для категорий/товаров по умолчанию True
             help="Если включено: модель обучается на ВСЕХ данных без разделения на train/test. "
                  "Используйте для продакшн-прогнозов на реальное будущее (не на тестовый период). "
-                 "⚠️ Метрики качества (MAPE, MAE, RMSE) не будут вычислены, так как нет тестового набора."
+                 "⚠️ Метрики качества (MAPE, MAE, RMSE) не будут вычислены, так как нет тестового набора. "
+                 "✅ РЕКОМЕНДУЕТСЯ для категорий/товаров с малым количеством данных!"
         )
         
         if skip_holdout:
             st.info("💡 **Режим прогноза на будущее:** Модель обучится на всех данных. "
                    "После обучения используйте раздел 'Generate Forecast' для прогноза на реальные будущие даты. "
                    "Holdout fraction будет проигнорирован.")
+        
+        # Специальное предупреждение для категорий/товаров с weekly агрегацией
+        if aggregation_level in ["category", "product"]:
+            if not skip_holdout and holdout_frac >= 0.2:
+                st.warning("⚠️ **Для категорий/товаров рекомендуется:** "
+                          "Включите 'Обучить на ВСЕХ данных' или уменьшите 'Доля данных для тестирования' до 0.1. "
+                          "Иначе может остаться слишком мало данных для обучения, особенно при weekly агрегации!")
         
         # Advanced hyperparameters
         with st.expander("🔧 Продвинутые гиперпараметры (для улучшения качества)", expanded=False):
@@ -364,6 +658,11 @@ if st.session_state.preprocessed_shop_csv:
                     index=0 if log_transform else 0,  # Suggest additive if log_transform is on
                     help="Additive: сезонность добавляется к тренду. Multiplicative: сезонность умножается на тренд (лучше для высокой волатильности, но БЕЗ log-transform)"
                 )
+                
+                # Предупреждение о проблемных комбинациях
+                if log_transform and seasonality_mode == 'multiplicative':
+                    st.warning("⚠️ **ВНИМАНИЕ**: Log-transform + Multiplicative seasonality могут конфликтовать! "
+                              "Рекомендуется использовать **Additive** режим при включенном log-transform.")
             
             with col2:
                 changepoint_prior_scale = st.slider(
@@ -406,9 +705,20 @@ if st.session_state.preprocessed_shop_csv:
     
     if st.button("🚀 Обучить модель", help="Обучает модель Prophet с выбранной конфигурацией"):
         try:
+            # Determine model output path based on aggregation level
+            base_model_path = model_out_path
+            if aggregation_level == "category" and filter_value:
+                # Create category-specific model path
+                category_name_safe = str(filter_value).replace("/", "_").replace("\\", "_")
+                base_model_path = f"models/model_category_{category_name_safe}.pkl"
+            elif aggregation_level == "product" and filter_value:
+                # Create product-specific model path
+                product_id_safe = str(filter_value).replace("/", "_").replace("\\", "_")
+                base_model_path = f"models/model_product_{product_id_safe}.pkl"
+            
             payload = {
-                "shop_csv": st.session_state.preprocessed_shop_csv,
-                "model_out": model_out_path,
+                "shop_csv": selected_csv,  # Use selected CSV (shop/category/product)
+                "model_out": base_model_path,
                 "include_regressors": include_regressors,
                 "log_transform": log_transform,
                 "interval_width": interval_width,
@@ -417,7 +727,9 @@ if st.session_state.preprocessed_shop_csv:
                 "seasonality_prior_scale": seasonality_prior_scale,
                 "seasonality_mode": seasonality_mode,
                 "auto_tune": auto_tune,
-                "skip_holdout": skip_holdout  # Новый параметр
+                "skip_holdout": skip_holdout,
+                "filter_column": filter_column,  # Add filter column
+                "filter_value": filter_value  # Add filter value
             }
             
             spinner_text = "Обучение модели с автоматическим подбором параметров (это может занять несколько минут)..." if auto_tune else "Обучение модели... Это может занять некоторое время."
@@ -922,6 +1234,34 @@ st.header("🔮 Шаг 5: Генерация прогноза")
 st.info("💡 **Прогноз на будущее:** Если модель была обучена с 'skip_holdout=True', прогноз будет сделан на даты **после** последней даты в обучающих данных. "
        "Для использования сохраненной модели укажите путь к `.pkl` файлу ниже.")
 
+# Заметный раздел для прогноза по категориям
+if st.session_state.preprocessed_category_csv:
+    with st.expander("📁 ПРОГНОЗ ПО КАТЕГОРИЯМ (Распределенный метод - РЕКОМЕНДУЕТСЯ)", expanded=True):
+        st.write("""
+        **🎯 Распределенный прогноз категорий:**
+        
+        Использует shop-level прогноз и распределяет его по категориям пропорционально их историческим долям.
+        Это **РЕКОМЕНДУЕТСЯ** для категорий, так как дает более точные результаты и избегает циклических паттернов.
+        
+        **📋 Что нужно сделать:**
+        1. Обучьте shop-level модель (в Шаге 3 выберите "По всему магазину")
+        2. Включите опцию ниже и следуйте инструкциям
+        """)
+        
+        use_distributed = st.checkbox(
+            "✅ Использовать распределенный прогноз категорий",
+            value=False,
+            key="use_distributed_main",
+            help="Включить альтернативный метод прогнозирования категорий через shop-level прогноз"
+        )
+        
+        if use_distributed:
+            st.session_state.use_distributed_forecast = True
+            st.session_state.selected_aggregation_level = "category"  # Устанавливаем уровень на category
+            st.success("💡 **Режим распределенного прогноза активирован!** Прокрутите вниз до раздела '🆕 Распределенный прогноз категорий' для настройки.")
+        else:
+            st.session_state.use_distributed_forecast = False
+
 if st.session_state.trained_model_path:
     # Показываем информацию о текущей модели
     model_info = f"🤖 Используется модель: `{st.session_state.trained_model_path}`"
@@ -966,10 +1306,15 @@ else:
     elif saved_model_path:
         st.warning("⚠️ Путь должен указывать на файл .pkl")
         st.stop()
+    else:
+        # Если модель не загружена, устанавливаем пустую модель_info
+        model_info = "ℹ️ Модель не загружена. Обучите модель в разделе 'Шаг 3' или загрузите сохраненную модель выше."
 
+# Проверяем уровень агрегации для распределенного прогноза
+aggregation_level = st.session_state.get('selected_aggregation_level', 'shop')
+
+# Если есть сравнение моделей, показываем информацию о выбранной
 if st.session_state.trained_model_path:
-    
-    # Если есть сравнение моделей, показываем информацию о выбранной
     if 'model_comparison' in st.session_state and st.session_state.model_comparison is not None:
         df_comp = st.session_state.model_comparison
         # Пытаемся определить, какая модель используется по пути
@@ -992,7 +1337,9 @@ if st.session_state.trained_model_path:
             mape_val = st.session_state.training_metrics.get('mape', 'N/A')
             model_info += f"\n📊 MAPE: {mape_val:.2f}%" if isinstance(mape_val, (int, float)) else ""
     
-    st.info(model_info)
+    # Показываем информацию о модели только если она загружена
+    if st.session_state.trained_model_path:
+        st.info(model_info)
     
     col1, col2 = st.columns(2)
     
@@ -1106,206 +1453,516 @@ if st.session_state.trained_model_path:
         smooth_alpha = 0.6
         max_change_pct = 0.015
     
-    if st.button("🔮 Сгенерировать прогноз", help="Генерирует прогноз на указанный горизонт"):
-        # Проверяем, требует ли модель регрессоры перед отправкой запроса
-        if model_requires_regressors and not regressors_csv:
-            st.error("❌ **Ошибка**: Модель требует регрессоры, но CSV файл не указан. Пожалуйста, укажите путь к CSV с колонками avg_price и avg_discount.")
-            st.stop()
+    # Проверяем уровень агрегации для распределенного прогноза
+    aggregation_level = st.session_state.get('selected_aggregation_level', 'shop')
+    use_distributed = st.session_state.get('use_distributed_forecast', False)
+    
+    if use_distributed and aggregation_level == "category":
+        # Распределенный прогноз категорий
+        st.subheader("🆕 Распределенный прогноз категорий")
         
-        if model_requires_regressors and regressors_csv:
-            import os
-            if not os.path.exists(regressors_csv):
-                st.error(f"❌ **Ошибка**: Файл с регрессорами не найден: {regressors_csv}")
-                st.stop()
+        # Параметры прогноза для распределенного метода
+        col_params, col_inputs = st.columns([1, 1])
         
-        try:
-            payload = {
-                "model_path": st.session_state.trained_model_path,
-                "horizon": int(horizon),
-                "log_transform": log_transform_predict,
-                "future_regressor_strategy": regressor_strategy,
-                "last_known_regressors_csv": regressors_csv if (regressors_csv and model_requires_regressors) else None,
-                "smooth_transition": smooth_transition,
-                "smooth_days": smooth_days,
-                "smooth_alpha": smooth_alpha,
-                "max_change_pct": max_change_pct / 100.0
-            }
+        with col_params:
+            horizon_distributed = st.number_input(
+                "Горизонт прогноза (дней)",
+                min_value=1,
+                max_value=365,
+                value=30,
+                step=1,
+                key="horizon_distributed",
+                help="Количество дней для прогноза в будущее"
+            )
             
-            with st.spinner("Генерация прогноза..."):
-                response = requests.post(f"{FASTAPI_URL}/predict", json=payload, timeout=120)
+            log_transform_distributed = st.checkbox(
+                "Применить log-transform для shop-level прогноза",
+                value=True,
+                key="log_transform_distributed",
+                help="Применить log-transform при генерации shop-level прогноза (рекомендуется)"
+            )
             
-            if response.status_code == 200:
-                result = response.json()
-                st.session_state.forecast_data = result["forecast"]
-                st.session_state.forecast_csv_path = result["forecast_csv_path"]
-                st.session_state.log_transform_used = log_transform_predict
-                st.success(f"✅ Прогноз успешно сгенерирован! ({result['n_predictions']} прогнозов)")
+            smooth_transition_distributed = st.checkbox(
+                "Smooth transition для shop-level прогноза",
+                value=True,
+                key="smooth_transition_distributed",
+                help="Применить smooth transition при генерации shop-level прогноза"
+            )
+        
+        with col_inputs:
+            shop_model_path = st.text_input(
+                "Путь к shop-level модели (.pkl)",
+                value="models/prophet_model.pkl",
+                help="Путь к обученной shop-level модели (обученной на shop CSV). По умолчанию: models/prophet_model.pkl"
+            )
+            
+            # Проверяем, требует ли модель регрессоры
+            shop_model_requires_regressors = False
+            if shop_model_path and shop_model_path.endswith('.pkl'):
+                import os
+                if os.path.exists(shop_model_path):
+                    try:
+                        import joblib
+                        model = joblib.load(shop_model_path)
+                        shop_model_requires_regressors = len(model.extra_regressors) > 0 if hasattr(model, 'extra_regressors') else False
+                    except Exception:
+                        pass
+            
+            shop_forecast_csv = st.text_input(
+                "Путь к shop-level прогнозу (CSV)",
+                value="",
+                help="Путь к уже сгенерированному shop-level прогнозу (CSV с колонками: ds, yhat, yhat_lower, yhat_upper). "
+                     "Если оставить пустым, будет сгенерирован автоматически."
+            )
+            
+            category_csv = st.text_input(
+                "Путь к CSV категорий",
+                value=st.session_state.preprocessed_category_csv if st.session_state.preprocessed_category_csv else "",
+                help="Путь к CSV файлу с историческими данными категорий (category, ds, y)"
+            )
+            
+            # Поле для регрессоров если модель их требует
+            if shop_model_requires_regressors:
+                st.warning("⚠️ **Shop-level модель требует регрессоры!** Укажите путь к CSV с регрессорами ниже.")
+                regressors_csv_distributed = st.text_input(
+                    "CSV с регрессорами (avg_price, avg_discount) - ОБЯЗАТЕЛЬНО",
+                    value=st.session_state.preprocessed_shop_csv if st.session_state.preprocessed_shop_csv else "",
+                    help="Путь к CSV файлу с регрессорами (должен содержать колонки: ds, avg_price, avg_discount). "
+                         "Обычно используется shop CSV из предобработки."
+                )
             else:
-                st.error(f"❌ Ошибка генерации прогноза: {response.text}")
-        except Exception as e:
-            st.error(f"❌ Ошибка при генерации прогноза: {str(e)}")
+                regressors_csv_distributed = None
+        
+        if st.button("🔮 Сгенерировать распределенный прогноз", help="Генерирует распределенный прогноз категорий через shop-level прогноз"):
+            # Проверяем наличие shop-level модели
+            if not shop_model_path or not shop_model_path.endswith('.pkl'):
+                st.error("❌ Укажите путь к shop-level модели (.pkl)")
+                st.stop()
+            
+            import os
+            if not os.path.exists(shop_model_path):
+                st.error(f"❌ Shop-level модель не найдена: {shop_model_path}")
+                st.stop()
+            
+            # Если shop-level прогноз не указан, генерируем его
+            if not shop_forecast_csv:
+                st.info("💡 Shop-level прогноз не указан. Генерируем автоматически...")
+                
+                # Проверяем наличие регрессоров если модель их требует
+                if shop_model_requires_regressors:
+                    if not regressors_csv_distributed or not regressors_csv_distributed.strip():
+                        st.error("❌ **Ошибка:** Shop-level модель требует регрессоры, но CSV файл не указан!")
+                        st.info("💡 Укажите путь к CSV с регрессорами (обычно это shop CSV из предобработки)")
+                        st.stop()
+                    
+                    import os
+                    if not os.path.exists(regressors_csv_distributed):
+                        st.error(f"❌ Файл с регрессорами не найден: {regressors_csv_distributed}")
+                        st.stop()
+                    
+                    # Проверяем наличие нужных колонок
+                    try:
+                        import pandas as pd
+                        df_check = pd.read_csv(regressors_csv_distributed)
+                        if 'avg_price' not in df_check.columns or 'avg_discount' not in df_check.columns:
+                            st.error("❌ CSV файл не содержит колонок avg_price и/или avg_discount!")
+                            st.info("💡 Убедитесь, что CSV содержит колонки: ds, avg_price, avg_discount")
+                            st.stop()
+                    except Exception as e:
+                        st.error(f"❌ Ошибка проверки CSV: {str(e)}")
+                        st.stop()
+                
+                try:
+                    shop_payload = {
+                        "model_path": shop_model_path,
+                        "horizon": int(horizon_distributed),
+                        "log_transform": log_transform_distributed,
+                        "smooth_transition": smooth_transition_distributed
+                    }
+                    
+                    # Добавляем регрессоры если нужны
+                    if shop_model_requires_regressors:
+                        shop_payload["last_known_regressors_csv"] = regressors_csv_distributed
+                        shop_payload["future_regressor_strategy"] = "ffill"  # Используем forward fill по умолчанию
+                    
+                    with st.spinner("Генерация shop-level прогноза..."):
+                        shop_response = requests.post(f"{FASTAPI_URL}/predict", json=shop_payload, timeout=120)
+                    
+                    if shop_response.status_code == 200:
+                        shop_result = shop_response.json()
+                        shop_forecast_csv = shop_result["forecast_csv_path"]
+                        st.success(f"✅ Shop-level прогноз создан: {shop_forecast_csv}")
+                    else:
+                        error_text = shop_response.text
+                        st.error(f"❌ Ошибка генерации shop-level прогноза: {error_text}")
+                        # Даем полезные советы
+                        if "regressors" in error_text.lower():
+                            st.info("💡 **Решение:** Убедитесь, что:\n"
+                                   "1. Shop-level модель была обучена с регрессорами (avg_price, avg_discount)\n"
+                                   "2. Указан правильный путь к CSV с регрессорами выше\n"
+                                   "3. CSV содержит колонки: ds, avg_price, avg_discount\n"
+                                   "4. Обычно используется shop CSV из предобработки (data/processed/sales_06_FY2020-21_shop.csv)")
+                        st.stop()
+                except Exception as e:
+                    st.error(f"❌ Ошибка при генерации shop-level прогноза: {str(e)}")
+                    st.stop()
+            
+            # Генерируем распределенный прогноз
+            try:
+                payload = {
+                    "shop_forecast_csv": shop_forecast_csv,
+                    "category_csv": category_csv if category_csv else st.session_state.preprocessed_category_csv,
+                    "horizon_days": int(horizon_distributed)
+                }
+                
+                with st.spinner("Распределение shop-level прогноза по категориям..."):
+                    response = requests.post(f"{FASTAPI_URL}/predict_category_distributed", json=payload, timeout=120)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    st.session_state.forecast_data = result["forecast"]
+                    st.session_state.forecast_csv_path = result["forecast_csv_path"]
+                    st.session_state.log_transform_used = False  # Распределенный прогноз не использует log transform
+                    # Исправляем ошибку - используем правильное поле
+                    n_cats = result.get('n_categories', len(set([f.get('category', '') for f in result.get('forecast', [])])))
+                    st.success(f"✅ Распределенный прогноз успешно сгенерирован! ({n_cats} категорий, {result.get('n_predictions', 0)} прогнозов)")
+                    # Сохраняем информацию о том, что это распределенный прогноз
+                    st.session_state.forecast_is_distributed = True
+                else:
+                    st.error(f"❌ Ошибка генерации распределенного прогноза: {response.text}")
+            except Exception as e:
+                st.error(f"❌ Ошибка при генерации распределенного прогноза: {str(e)}")
+    else:
+        # Обычный прогноз
+        if st.button("🔮 Сгенерировать прогноз", help="Генерирует прогноз на указанный горизонт"):
+            # Проверяем, требует ли модель регрессоры перед отправкой запроса
+            if model_requires_regressors and not regressors_csv:
+                st.error("❌ **Ошибка**: Модель требует регрессоры, но CSV файл не указан. Пожалуйста, укажите путь к CSV с колонками avg_price и avg_discount.")
+                st.stop()
+            
+            if model_requires_regressors and regressors_csv:
+                import os
+                if not os.path.exists(regressors_csv):
+                    st.error(f"❌ **Ошибка**: Файл с регрессорами не найден: {regressors_csv}")
+                    st.stop()
+            
+            try:
+                payload = {
+                    "model_path": st.session_state.trained_model_path,
+                    "horizon": int(horizon),
+                    "log_transform": log_transform_predict,
+                    "future_regressor_strategy": regressor_strategy,
+                    "last_known_regressors_csv": regressors_csv if (regressors_csv and model_requires_regressors) else None,
+                    "smooth_transition": smooth_transition,
+                    "smooth_days": smooth_days,
+                    "smooth_alpha": smooth_alpha,
+                    "max_change_pct": max_change_pct / 100.0
+                }
+                
+                with st.spinner("Генерация прогноза..."):
+                    response = requests.post(f"{FASTAPI_URL}/predict", json=payload, timeout=120)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    st.session_state.forecast_data = result["forecast"]
+                    st.session_state.forecast_csv_path = result["forecast_csv_path"]
+                    st.session_state.log_transform_used = log_transform_predict
+                    st.success(f"✅ Прогноз успешно сгенерирован! ({result['n_predictions']} прогнозов)")
+                else:
+                    st.error(f"❌ Ошибка генерации прогноза: {response.text}")
+            except Exception as e:
+                st.error(f"❌ Ошибка при генерации прогноза: {str(e)}")
     
     # Display forecast visualization and table if forecast data exists
     if st.session_state.forecast_data is not None and st.session_state.forecast_csv_path is not None:
-        # Load forecast data
-        df_forecast = pd.DataFrame(st.session_state.forecast_data)
-        df_forecast['ds'] = pd.to_datetime(df_forecast['ds'])
-        
-        # Ensure non-negative values (safety check for visualization)
-        if 'yhat' in df_forecast.columns:
-            n_neg = (df_forecast['yhat'] < 0).sum()
-            if n_neg > 0:
-                st.warning(f"⚠️ Найдено {n_neg} отрицательных значений прогноза, обрезано до 0")
-                df_forecast['yhat'] = df_forecast['yhat'].clip(lower=0.0)
-        
-        if 'yhat_lower' in df_forecast.columns:
-            n_neg = (df_forecast['yhat_lower'] < 0).sum()
-            if n_neg > 0:
-                st.warning(f"⚠️ Найдено {n_neg} отрицательных нижних границ, обрезано до 0")
-                df_forecast['yhat_lower'] = df_forecast['yhat_lower'].clip(lower=0.0)
-        
-        if 'yhat_upper' in df_forecast.columns:
-            n_neg = (df_forecast['yhat_upper'] < 0).sum()
-            if n_neg > 0:
-                st.warning(f"⚠️ Найдено {n_neg} отрицательных верхних границ, обрезано до 0")
-                df_forecast['yhat_upper'] = df_forecast['yhat_upper'].clip(lower=0.0)
-        
-        # Ensure yhat_upper >= yhat_lower
-        if 'yhat_lower' in df_forecast.columns and 'yhat_upper' in df_forecast.columns:
-            df_forecast['yhat_upper'] = df_forecast[['yhat_upper', 'yhat_lower']].max(axis=1)
-        
-        # Plot forecast
-        st.subheader("📈 Визуализация прогноза")
-        
-        # Добавляем пояснения к столбцам прогноза
-        with st.expander("📚 Пояснения к столбцам прогноза", expanded=False):
-            st.write("""
-            **Столбцы в таблице прогноза:**
+        # Загружаем прогноз из CSV для правильной обработки распределенного прогноза
+        try:
+            df_forecast_full = pd.read_csv(st.session_state.forecast_csv_path)
+            df_forecast_full['ds'] = pd.to_datetime(df_forecast_full['ds'])
             
-            - **ds** - Дата прогноза
+            # Проверяем, является ли это распределенным прогнозом категорий
+            is_distributed_category_forecast = 'category' in df_forecast_full.columns
             
-            - **yhat** - Прогнозируемое значение продаж (основной прогноз модели)
-            
-            - **yhat_lower** - Нижняя граница доверительного интервала (для указанного уровня уверенности)
-            
-            - **yhat_upper** - Верхняя граница доверительного интервала
-            
-            **Интерпретация:**
-            - **yhat** - это наиболее вероятное значение продаж на указанную дату
-            - Интервал [yhat_lower, yhat_upper] показывает диапазон, в который с заданной вероятностью (например, 95%) попадут фактические значения
-            - Чем уже интервал, тем увереннее модель в своем прогнозе
-            """)
-        
-        # Load history if available
-        df_history = None
-        train_end_date = None
-        
-        # Try to get training range from session state (stored after training)
-        if 'training_metrics' in st.session_state and st.session_state.training_metrics:
-            try:
-                # Check if train_range is stored in metrics response
-                # We need to get it from the training response, but for now use forecast start date
-                forecast_start = df_forecast['ds'].min()
-                # Assume training ended 1 day before forecast starts (typical case)
-                train_end_date = forecast_start - pd.Timedelta(days=1)
-            except:
-                pass
-        
-        if st.session_state.preprocessed_shop_csv:
-            try:
-                df_history = pd.read_csv(st.session_state.preprocessed_shop_csv)
-                df_history['ds'] = pd.to_datetime(df_history['ds'])
-                df_history = df_history.sort_values('ds')
+            if is_distributed_category_forecast:
+                # Распределенный прогноз категорий - показываем отдельные графики
+                st.subheader("📈 Визуализация прогноза по категориям")
                 
-                # If we know training end date, split history into train/test periods
-                if train_end_date is not None:
-                    df_history_train = df_history[df_history['ds'] <= train_end_date].copy()
-                    df_history_test = df_history[df_history['ds'] > train_end_date].copy()
+                # Получаем список категорий
+                categories = sorted(df_forecast_full['category'].unique())
+                
+                # Выбор категорий для отображения
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    display_mode = st.radio(
+                        "Режим отображения:",
+                        options=["top5", "selected", "all"],
+                        format_func=lambda x: {
+                            "top5": "📊 Топ-5 категорий (по среднему прогнозу)",
+                            "selected": "✅ Выбранные категории (чекбоксы)",
+                            "all": "📋 Все категории"
+                        }[x],
+                        index=0,
+                        help="Выберите какие категории показывать на графиках"
+                    )
+                
+                with col2:
+                    if display_mode == "all":
+                        st.info(f"Показано категорий: {len(categories)}")
+                    elif display_mode == "top5":
+                        st.info("Показано категорий: 5")
+                
+                # Определяем какие категории показывать
+                if display_mode == "top5":
+                    # Вычисляем средний прогноз для каждой категории
+                    category_means = df_forecast_full.groupby('category')['yhat'].mean().sort_values(ascending=False)
+                    selected_categories = category_means.head(5).index.tolist()
+                    st.info(f"📊 Топ-5 категорий по среднему прогнозу: {', '.join(selected_categories)}")
+                elif display_mode == "selected":
+                    # Чекбоксы для выбора категорий
+                    st.write("**Выберите категории для отображения:**")
+                    selected_categories = []
+                    n_cols = 3
+                    cols = st.columns(n_cols)
+                    for idx, cat in enumerate(categories):
+                        col_idx = idx % n_cols
+                        with cols[col_idx]:
+                            if st.checkbox(cat, value=(idx < 5), key=f"cat_checkbox_{cat}"):
+                                selected_categories.append(cat)
+                    if not selected_categories:
+                        st.warning("⚠️ Не выбрано ни одной категории! Выберите хотя бы одну.")
+                        selected_categories = categories[:5]  # Fallback на первые 5
                 else:
-                    # Use forecast start date as approximation
-                    forecast_start = df_forecast['ds'].min()
-                    df_history_train = df_history[df_history['ds'] < forecast_start].copy()
-                    df_history_test = df_history[df_history['ds'] >= forecast_start].copy()
-            except:
+                    selected_categories = categories
+                
+                # Показываем графики для каждой выбранной категории
+                for category in selected_categories:
+                    cat_forecast = df_forecast_full[df_forecast_full['category'] == category].copy()
+                    cat_forecast = cat_forecast.sort_values('ds')
+                    
+                    # Загружаем историю для этой категории
+                    cat_history = None
+                    if st.session_state.preprocessed_category_csv:
+                        try:
+                            df_history_all = pd.read_csv(st.session_state.preprocessed_category_csv)
+                            df_history_all['ds'] = pd.to_datetime(df_history_all['ds'])
+                            cat_history = df_history_all[df_history_all['category'] == category].copy()
+                            cat_history = cat_history.sort_values('ds')
+                            
+                            # Разделяем на train/test
+                            forecast_start = cat_forecast['ds'].min()
+                            cat_history_train = cat_history[cat_history['ds'] < forecast_start].copy()
+                            cat_history_test = cat_history[cat_history['ds'] >= forecast_start].copy()
+                        except Exception as e:
+                            logger.warning(f"Could not load history for {category}: {str(e)}")
+                            cat_history_train = None
+                            cat_history_test = None
+                    else:
+                        cat_history_train = None
+                        cat_history_test = None
+                    
+                    # Создаем график для категории
+                    fig = go.Figure()
+                    
+                    # Исторические данные (период обучения)
+                    if cat_history_train is not None and not cat_history_train.empty:
+                        fig.add_trace(go.Scatter(
+                            x=cat_history_train['ds'],
+                            y=cat_history_train['y'],
+                            mode='lines',
+                            name='Исторические продажи (период обучения)',
+                            line=dict(color='blue', width=2)
+                        ))
+                    
+                    # Фактические продажи (тестовый период)
+                    if cat_history_test is not None and not cat_history_test.empty:
+                        fig.add_trace(go.Scatter(
+                            x=cat_history_test['ds'],
+                            y=cat_history_test['y'],
+                            mode='lines',
+                            name='Фактические продажи (тестовый период)',
+                            line=dict(color='green', width=2, dash='dash')
+                        ))
+                    
+                    # Прогноз
+                    fig.add_trace(go.Scatter(
+                        x=cat_forecast['ds'],
+                        y=cat_forecast['yhat'],
+                        mode='lines',
+                        name='Прогноз (будущее)',
+                        line=dict(color='red', width=2)
+                    ))
+                    
+                    # Доверительный интервал
+                    if 'yhat_lower' in cat_forecast.columns and 'yhat_upper' in cat_forecast.columns:
+                        fig.add_trace(go.Scatter(
+                            x=cat_forecast['ds'],
+                            y=cat_forecast['yhat_upper'],
+                            mode='lines',
+                            line=dict(width=0),
+                            showlegend=False,
+                            hoverinfo='skip'
+                        ))
+                        fig.add_trace(go.Scatter(
+                            x=cat_forecast['ds'],
+                            y=cat_forecast['yhat_lower'],
+                            mode='lines',
+                            line=dict(width=0),
+                            fill='tonexty',
+                            fillcolor='rgba(255, 0, 0, 0.2)',
+                            name='Доверительный интервал',
+                            showlegend=True,
+                            hoverinfo='skip'
+                        ))
+                    
+                    fig.update_layout(
+                        title=f"Прогноз продаж: {category}",
+                        xaxis_title="Дата",
+                        yaxis_title="Продажи",
+                        hovermode='x unified',
+                        height=400,
+                        showlegend=True
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Краткая статистика по категории
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric(f"{category}: Средний прогноз", f"{cat_forecast['yhat'].mean():.1f}")
+                    with col2:
+                        st.metric("Минимум", f"{cat_forecast['yhat'].min():.1f}")
+                    with col3:
+                        st.metric("Максимум", f"{cat_forecast['yhat'].max():.1f}")
+                    with col4:
+                        st.metric("Дней прогноза", len(cat_forecast))
+                    
+                    st.markdown("---")
+                
+                # Общая таблица со всеми категориями
+                with st.expander("📋 Таблица прогноза для всех категорий", expanded=False):
+                    st.dataframe(df_forecast_full, use_container_width=True)
+                    
+            else:
+                # Обычный прогноз (shop-level или одна категория/товар)
+                # Используем существующую логику визуализации
+                df_forecast = df_forecast_full.copy()
+                
+                # Ensure non-negative values
+                if 'yhat' in df_forecast.columns:
+                    df_forecast['yhat'] = df_forecast['yhat'].clip(lower=0.0)
+                if 'yhat_lower' in df_forecast.columns:
+                    df_forecast['yhat_lower'] = df_forecast['yhat_lower'].clip(lower=0.0)
+                if 'yhat_upper' in df_forecast.columns:
+                    df_forecast['yhat_upper'] = df_forecast['yhat_upper'].clip(lower=0.0)
+                if 'yhat_lower' in df_forecast.columns and 'yhat_upper' in df_forecast.columns:
+                    df_forecast['yhat_upper'] = df_forecast[['yhat_upper', 'yhat_lower']].max(axis=1)
+                
+                # Plot forecast
+                st.subheader("📈 Визуализация прогноза")
+                
+                # Load history if available
                 df_history_train = None
                 df_history_test = None
-        else:
-            df_history_train = None
-            df_history_test = None
-        
-        fig = go.Figure()
-        
-        # Plot training period data
-        if df_history_train is not None and not df_history_train.empty:
-            fig.add_trace(go.Scatter(
-                x=df_history_train['ds'],
-                y=df_history_train['y'],
-                mode='lines',
-                name='Исторические продажи (период обучения)',
-                line=dict(color='blue', width=2)
-            ))
-        
-        # Plot test period data (if available) - это реальные данные для сравнения
-        if df_history_test is not None and not df_history_test.empty:
-            fig.add_trace(go.Scatter(
-                x=df_history_test['ds'],
-                y=df_history_test['y'],
-                mode='lines',
-                name='Фактические продажи (тестовый период)',
-                line=dict(color='green', width=2, dash='dash')
-            ))
-        
-        # Plot forecast (future predictions)
-        fig.add_trace(go.Scatter(
-            x=df_forecast['ds'],
-            y=df_forecast['yhat'],
-            mode='lines',
-            name='Прогноз (будущее)',
-            line=dict(color='red', width=2)
-        ))
-        
-        # Plot confidence intervals
-        if 'yhat_lower' in df_forecast.columns and 'yhat_upper' in df_forecast.columns:
-            fig.add_trace(go.Scatter(
-                x=df_forecast['ds'],
-                y=df_forecast['yhat_upper'],
-                mode='lines',
-                line=dict(width=0),
-                showlegend=False,
-                hoverinfo='skip'
-            ))
-            fig.add_trace(go.Scatter(
-                x=df_forecast['ds'],
-                y=df_forecast['yhat_lower'],
-                mode='lines',
-                line=dict(width=0),
-                fill='tonexty',
-                fillcolor='rgba(255, 0, 0, 0.2)',
-                name='Доверительный интервал',
-                showlegend=True,
-                hoverinfo='skip'
-            ))
-        
-        title = "Прогноз продаж"
-        if st.session_state.get('log_transform_used', False):
-            title += " (Применен Log Transform)"
-        
-        fig.update_layout(
-            title=title,
-            xaxis_title="Дата",
-            yaxis_title="Продажи",
-            hovermode='x unified',
-            height=500,
-            showlegend=True
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Display forecast table
-        st.subheader("📋 Таблица прогноза")
-        st.dataframe(df_forecast, use_container_width=True)
-        
-        # Download PDF section
+                aggregation_level = st.session_state.get('selected_aggregation_level', 'shop')
+                
+                if aggregation_level == "category":
+                    history_csv = st.session_state.preprocessed_category_csv
+                    history_filter_column = "category"
+                    history_filter_value = st.session_state.get('selected_filter_value')
+                elif aggregation_level == "product":
+                    history_csv = st.session_state.preprocessed_product_csv
+                    history_filter_column = "product_id"
+                    history_filter_value = st.session_state.get('selected_filter_value')
+                else:
+                    history_csv = st.session_state.preprocessed_shop_csv
+                    history_filter_column = None
+                    history_filter_value = None
+                
+                if history_csv:
+                    try:
+                        df_history = pd.read_csv(history_csv)
+                        df_history['ds'] = pd.to_datetime(df_history['ds'])
+                        
+                        if history_filter_column and history_filter_value and history_filter_column in df_history.columns:
+                            df_history = df_history[df_history[history_filter_column].astype(str) == str(history_filter_value)].copy()
+                        
+                        df_history = df_history.sort_values('ds')
+                        forecast_start = df_forecast['ds'].min()
+                        df_history_train = df_history[df_history['ds'] < forecast_start].copy()
+                        df_history_test = df_history[df_history['ds'] >= forecast_start].copy()
+                    except Exception as e:
+                        logger.error(f"Error loading history: {str(e)}")
+                
+                fig = go.Figure()
+                
+                if df_history_train is not None and not df_history_train.empty:
+                    fig.add_trace(go.Scatter(
+                        x=df_history_train['ds'],
+                        y=df_history_train['y'],
+                        mode='lines',
+                        name='Исторические продажи (период обучения)',
+                        line=dict(color='blue', width=2)
+                    ))
+                
+                if df_history_test is not None and not df_history_test.empty:
+                    fig.add_trace(go.Scatter(
+                        x=df_history_test['ds'],
+                        y=df_history_test['y'],
+                        mode='lines',
+                        name='Фактические продажи (тестовый период)',
+                        line=dict(color='green', width=2, dash='dash')
+                    ))
+                
+                fig.add_trace(go.Scatter(
+                    x=df_forecast['ds'],
+                    y=df_forecast['yhat'],
+                    mode='lines',
+                    name='Прогноз (будущее)',
+                    line=dict(color='red', width=2)
+                ))
+                
+                if 'yhat_lower' in df_forecast.columns and 'yhat_upper' in df_forecast.columns:
+                    fig.add_trace(go.Scatter(
+                        x=df_forecast['ds'],
+                        y=df_forecast['yhat_upper'],
+                        mode='lines',
+                        line=dict(width=0),
+                        showlegend=False,
+                        hoverinfo='skip'
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=df_forecast['ds'],
+                        y=df_forecast['yhat_lower'],
+                        mode='lines',
+                        line=dict(width=0),
+                        fill='tonexty',
+                        fillcolor='rgba(255, 0, 0, 0.2)',
+                        name='Доверительный интервал',
+                        showlegend=True,
+                        hoverinfo='skip'
+                    ))
+                
+                title = "Прогноз продаж"
+                if st.session_state.get('log_transform_used', False):
+                    title += " (Применен Log Transform)"
+                
+                fig.update_layout(
+                    title=title,
+                    xaxis_title="Дата",
+                    yaxis_title="Продажи",
+                    hovermode='x unified',
+                    height=500,
+                    showlegend=True
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                st.subheader("📋 Таблица прогноза")
+                st.dataframe(df_forecast, use_container_width=True)
+        except Exception as e:
+            st.error(f"❌ Ошибка при загрузке данных прогноза: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
         st.subheader("📥 Скачать PDF отчет")
         
         # Button to generate PDF

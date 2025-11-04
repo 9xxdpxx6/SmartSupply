@@ -8,7 +8,7 @@ import warnings
 import json
 import os
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -44,13 +44,15 @@ def train_prophet(
     seasonality_prior_scale: float = 10.0,
     seasonality_mode: str = 'additive',
     auto_tune: bool = False,
-    skip_holdout: bool = False  # Если True, использует ВСЕ данные для обучения (без теста)
+    skip_holdout: bool = False,  # Если True, использует ВСЕ данные для обучения (без теста)
+    filter_column: Optional[str] = None,  # 'category' или 'product_id' для фильтрации
+    filter_value: Optional[str] = None  # Значение для фильтрации (название категории или ID товара)
 ) -> Dict[str, Any]:
     """
-    Train a Prophet model on shop-level sales data.
+    Train a Prophet model on sales data (shop-level, category-level, or product-level).
     
     Args:
-        shop_csv_path: Path to the shop-level CSV file (ds, y, avg_price, avg_discount, day_of_week, is_weekend)
+        shop_csv_path: Path to the CSV file (shop-level, category-level, or product-level)
         model_out_path: Path to save the trained model using joblib
         include_regressors: Whether to include avg_price and avg_discount as regressors
         log_transform: If True, apply log1p transformation to y before training
@@ -60,18 +62,23 @@ def train_prophet(
         seasonality_prior_scale: Strength of seasonality components (default 10.0, higher = stronger seasonality)
         seasonality_mode: 'additive' or 'multiplicative' (default 'additive')
         auto_tune: If True, perform automatic grid search to find best configuration
+        filter_column: Optional column name for filtering ('category' or 'product_id')
+        filter_value: Optional value to filter by (category name or product_id)
         
     Returns:
         Dictionary containing model path, metrics, and data ranges
     """
     logger.info(f"Starting model training from: {shop_csv_path}")
     
+    # Если указана фильтрация, логируем
+    if filter_column and filter_value:
+        logger.info(f"Filtering data: {filter_column} = '{filter_value}'")
+    
     # Auto-tuning: perform grid search
     if auto_tune:
         logger.info("Auto-tuning enabled: performing grid search...")
         try:
             from app.tuning import grid_search_models
-            import os
             
             analysis_dir = os.path.join(os.path.dirname(model_out_path) or 'models', '..', 'analysis')
             analysis_dir = os.path.normpath(analysis_dir)
@@ -122,6 +129,38 @@ def train_prophet(
     if 'ds' not in df.columns or 'y' not in df.columns:
         raise ValueError("CSV must contain 'ds' and 'y' columns")
     
+    # Apply filtering if specified
+    if filter_column and filter_value:
+        if filter_column not in df.columns:
+            raise ValueError(f"Filter column '{filter_column}' not found in CSV. Available columns: {list(df.columns)}")
+        
+        # Convert filter_value to appropriate type if needed
+        if filter_column == 'product_id':
+            # Try to match product_id as string or convert to match data type
+            df_filtered = df[df[filter_column].astype(str) == str(filter_value)].copy()
+        else:
+            # For category, match as string
+            df_filtered = df[df[filter_column].astype(str) == str(filter_value)].copy()
+        
+        if len(df_filtered) == 0:
+            available_values = df[filter_column].unique()[:10]  # Show first 10
+            raise ValueError(f"No data found for {filter_column}='{filter_value}'. "
+                           f"Available values (first 10): {list(available_values)}")
+        
+        df = df_filtered
+        logger.info(f"After filtering: {len(df)} rows for {filter_column}='{filter_value}'")
+        
+        # Проверяем минимальное количество данных после фильтрации
+        # Для недельной агрегации требуется меньше строк, чем для дневной
+        min_required = 8 if 'ds' in df.columns and len(df) > 0 and (pd.to_datetime(df['ds'].max()) - pd.to_datetime(df['ds'].min())).days < 100 else 30
+        if len(df) < min_required:
+            raise ValueError(f"⚠️ НЕДОСТАТОЧНО ДАННЫХ для {filter_column}='{filter_value}': {len(df)} строк "
+                           f"(минимум {min_required} требуется). "
+                           f"Для категорий с малым количеством данных попробуйте:\n"
+                           f"1. Использовать shop-level прогноз (более стабильный)\n"
+                           f"2. Увеличить период данных\n"
+                           f"3. Использовать skip_holdout=True для обучения на всех данных")
+    
     # Prepare the data
     df = df.copy()
     df['ds'] = pd.to_datetime(df['ds'])
@@ -157,10 +196,37 @@ def train_prophet(
     # Apply log transformation if requested (after split to preserve original test values)
     # Always save original test y values for metrics calculation
     df_test_original_y = df_test['y'].copy()
+    
     if log_transform:
         logger.info("Applying log1p transformation to target variable")
+        
+        # Проверяем, что после log_transform останется достаточно данных
+        # log1p(0) = 0, так что нули остаются нулями, но Prophet может не работать с большим количеством нулей
+        non_zero_before = (df_train['y'] > 0).sum()
+        if non_zero_before < 2:
+            raise ValueError(f"⚠️ КРИТИЧЕСКАЯ ОШИБКА: После фильтрации по {filter_column}='{filter_value}' осталось "
+                           f"только {non_zero_before} ненулевых значений в обучающем наборе ({len(df_train)} всего). "
+                           f"Prophet не может обучаться на таких данных.\n"
+                           f"Рекомендации:\n"
+                           f"1. Используйте shop-level прогноз вместо категорийного\n"
+                           f"2. Попробуйте без log-transform (снимите галочку)\n"
+                           f"3. Используйте skip_holdout=True для обучения на всех данных\n"
+                           f"4. Убедитесь, что выбранная категория имеет достаточно продаж")
+        
         df_train['y'] = np.log1p(df_train['y'])
         df_test['y'] = np.log1p(df_test['y'])
+        
+        # Проверяем, что после log_transform не появилось NaN
+        nan_count_train = df_train['y'].isna().sum()
+        if nan_count_train > 0:
+            logger.warning(f"После log_transform появилось {nan_count_train} NaN значений, заменяем на 0")
+            df_train['y'] = df_train['y'].fillna(0)
+        
+        nan_count_test = df_test['y'].isna().sum()
+        if nan_count_test > 0 and len(df_test) > 0:
+            logger.warning(f"После log_transform в тесте появилось {nan_count_test} NaN значений, заменяем на 0")
+            df_test['y'] = df_test['y'].fillna(0)
+    
     
     train_range = {
         'start': df_train['ds'].min().isoformat(),
@@ -194,6 +260,46 @@ def train_prophet(
     
     df_prophet_train = df_train[prophet_cols].copy()
     
+    # Для категорий/товаров: проверяем и обрабатываем много нулевых значений
+    if filter_column is not None:
+        zero_count = (df_prophet_train['y'] == 0).sum()
+        zero_percent = (zero_count / len(df_prophet_train)) * 100 if len(df_prophet_train) > 0 else 0
+        
+        # Более агрессивная обработка для категорий с >30% нулей
+        if zero_percent > 30:
+            logger.warning(f"⚠️ МНОГО НУЛЕВЫХ ЗНАЧЕНИЙ: {zero_percent:.1f}% ({zero_count} из {len(df_prophet_train)})")
+            logger.warning("Это может сильно ухудшить прогноз. Prophet плохо работает с разреженными данными.")
+            
+            # Определяем, нужен ли агрессивный режим
+            use_aggressive = zero_percent > 50
+            if use_aggressive:
+                logger.warning("⚠️ ОЧЕНЬ РАЗРЕЖЕННЫЕ ДАННЫЕ! Применяем АГРЕССИВНУЮ обработку...")
+            
+            # Применяем улучшение качества данных (замена нулей на медианы, сглаживание)
+            try:
+                from app.preprocessing import _improve_data_quality
+                df_prophet_train = _improve_data_quality(df_prophet_train, aggressive=use_aggressive)
+                logger.info("Улучшение качества данных применено успешно")
+                
+                # Проверяем результат
+                zero_count_after = (df_prophet_train['y'] == 0).sum()
+                zero_percent_after = (zero_count_after / len(df_prophet_train)) * 100 if len(df_prophet_train) > 0 else 0
+                logger.info(f"После обработки: {zero_percent_after:.1f}% нулей (было {zero_percent:.1f}%)")
+            except Exception as e:
+                logger.warning(f"Не удалось применить улучшение качества данных: {str(e)}")
+        
+        if zero_percent > 70:
+            logger.error(f"⚠️ КРИТИЧЕСКИ МНОГО НУЛЕЙ: {zero_percent:.1f}%!")
+            logger.error("Prophet может дать плохой прогноз даже без сезонности.")
+            logger.error("РЕКОМЕНДАЦИЯ: Используйте shop-level прогноз и распределите его по категориям пропорционально.")
+        
+        # Предупреждение о необходимости skip_holdout для разреженных категорий
+        if zero_percent > 40 and not skip_holdout:
+            logger.warning(f"⚠️ ВАЖНО: Для категории с {zero_percent:.1f}% нулей рекомендуется:")
+            logger.warning("  1. Включить 'skip_holdout=True' (обучение на ВСЕХ данных)")
+            logger.warning("  2. Или уменьшить holdout_frac до 0.05-0.1")
+            logger.warning("  3. Иначе может остаться слишком мало данных для обучения!")
+    
     # Validate seasonality_mode
     if seasonality_mode not in ['additive', 'multiplicative']:
         raise ValueError(f"seasonality_mode must be 'additive' or 'multiplicative', got '{seasonality_mode}'")
@@ -203,15 +309,62 @@ def train_prophet(
     days_span = (df['ds'].max() - df['ds'].min()).days
     use_yearly = days_span >= 730  # Только если данных >= 2 лет
     
+    # Определяем, является ли агрегация weekly или daily
+    # Проверяем средний интервал между датами
+    if len(df) > 1:
+        df_sorted = df.sort_values('ds')
+        time_diffs = df_sorted['ds'].diff().dropna()
+        avg_days_between = time_diffs.median().total_seconds() / (24 * 3600) if len(time_diffs) > 0 else 1.0
+        is_weekly_aggregated = avg_days_between >= 5.0  # Если средний интервал >= 5 дней, это weekly
+    else:
+        is_weekly_aggregated = False
+        avg_days_between = 1.0
+    
+    # Для категорий/товаров применяем более агрессивные настройки по умолчанию
+    # если пользователь не указал явно другие значения
+    is_category_or_product = filter_column is not None
+    if is_category_or_product:
+        # Для категорий увеличиваем гибкость changepoints еще больше для улавливания волатильности
+        # Используем только changepoints без seasonality для избежания циклических паттернов
+        if changepoint_prior_scale <= 0.01:
+            changepoint_prior_scale = 0.25  # Высокая гибкость для улавливания всплесков и падений
+            logger.info("Category/product data: increasing changepoint_prior_scale to 0.25 for better volatility capture")
+        elif changepoint_prior_scale < 0.2:
+            changepoint_prior_scale = max(changepoint_prior_scale * 2.0, 0.2)  # Увеличиваем если пользователь указал низкое значение
+            logger.info(f"Category/product data: increasing changepoint_prior_scale to {changepoint_prior_scale} for volatility")
+        
+        # Для категорий полностью отключаем seasonality - используем только changepoints
+        seasonality_prior_scale = 0.1  # Минимальное значение (сезонность будет отключена)
+        logger.info("Category/product data: disabling seasonality completely, using only trend + flexible changepoints")
+        
+        # Уменьшаем interval_width для более узкого доверительного интервала
+        if interval_width >= 0.95:
+            interval_width = 0.80  # Более узкий интервал для категорий
+            logger.info("Category/product data: reducing interval_width to 0.80 for narrower confidence interval")
+    
     if not use_yearly and days_span < 730:
         logger.warning(f"Data span ({days_span} days) < 730 days. Disabling yearly_seasonality for stability.")
         logger.info("Using only weekly_seasonality. This is recommended for datasets < 2 years.")
         logger.warning("⚠️ LONG-TERM FORECAST WARNING: For forecasts > 90 days with data < 2 years, "
                       "the model may show flat/cyclical patterns due to missing yearly_seasonality.")
     
+    # Определяем, использовать ли weekly seasonality
+    # Для категорий/товаров полностью отключаем seasonality - используем только changepoints
+    if filter_column is not None:
+        # Для категорий полностью отключаем weekly и yearly seasonality
+        # Волатильность будет улавливаться через гибкие changepoints
+        use_weekly_seasonality = False
+        use_yearly = False  # Yearly отключаем для категорий
+        logger.info(f"⚠️ Для категорий/товаров полностью отключаем сезонность")
+        logger.info("Волатильность будет улавливаться через гибкие changepoints (changepoint_prior_scale={:.2f})".format(changepoint_prior_scale))
+        logger.info("Это должно устранить циклические паттерны при сохранении способности улавливать всплески и падения")
+    else:
+        use_weekly_seasonality = True
+        # use_yearly уже определен выше
+    
     # Initialize Prophet model with configurable hyperparameters
     model = Prophet(
-        weekly_seasonality=True,
+        weekly_seasonality=use_weekly_seasonality,  # Отключено для категорий
         yearly_seasonality=use_yearly,  # Автоматически отключаем для коротких данных
         interval_width=interval_width,
         changepoint_prior_scale=changepoint_prior_scale,
@@ -219,12 +372,17 @@ def train_prophet(
         seasonality_mode=seasonality_mode
     )
     
+    # Для weekly агрегации категорий НЕ добавляем monthly seasonality - она создает циклические паттерны
     # Для данных >= 365 дней (но < 730): добавляем месячную сезонность как компромисс
+    # НО только для daily агрегации или shop-level данных
     if days_span >= 365 and days_span < 730:
-        logger.info(f"Data span ({days_span} days) >= 365 but < 730. Adding monthly seasonality as a compromise.")
-        # Добавляем месячную сезонность для сохранения сезонных паттернов на длинных горизонтах
-        model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
-        logger.info("Added monthly seasonality (period=30.5 days, fourier_order=5) to preserve seasonal patterns on long horizons")
+        # Для категорий/товаров НЕ добавляем monthly seasonality
+        if filter_column is not None:
+            logger.info("Category/product data: skipping monthly seasonality (using only trend)")
+        else:
+            # Для shop-level добавляем monthly seasonality
+            logger.info(f"Data span ({days_span} days) >= 365 but < 730. Adding monthly seasonality.")
+            model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
     
     logger.info(f"Prophet model config: changepoint_prior_scale={changepoint_prior_scale}, "
                 f"seasonality_prior_scale={seasonality_prior_scale}, seasonality_mode={seasonality_mode}")
@@ -235,10 +393,59 @@ def train_prophet(
         model.add_regressor('avg_price')
         model.add_regressor('avg_discount')
     
+    # Финальная проверка перед обучением модели
+    # Проверяем количество валидных (non-NaN) строк после всех преобразований
+    valid_rows = df_prophet_train['y'].notna().sum()
+    total_rows = len(df_prophet_train)
+    
+    if valid_rows < 2:
+        error_msg = (
+            f"⚠️ КРИТИЧЕСКАЯ ОШИБКА: После всех преобразований осталось меньше 2 валидных строк "
+            f"для обучения ({valid_rows} из {total_rows} строк).\n\n"
+            f"Возможные причины:\n"
+            f"1. Слишком много нулевых значений в категории/товаре (>90%)\n"
+            f"2. Недельная агрегация + фильтрация оставила слишком мало данных "
+            f"   (нужно минимум 8-10 недель для недельной агрегации)\n"
+            f"3. log_transform в сочетании с разреженными данными создал проблемы\n"
+            f"4. holdout_frac слишком большой для маленького датасета\n\n"
+            f"Решения (в порядке приоритета):\n"
+            f"1. ❌ ОТКЛЮЧИТЕ log-transform (снимите галочку) - это часто решает проблему\n"
+            f"2. ✅ Используйте skip_holdout=True (обучение на ВСЕХ данных без разделения)\n"
+            f"3. ✅ Попробуйте daily агрегацию вместо weekly (больше данных)\n"
+            f"4. ✅ Используйте shop-level прогноз (работает стабильнее для разреженных категорий)\n"
+            f"5. ✅ Выберите другую категорию с большим количеством продаж"
+        )
+        
+        if filter_column is not None:
+            error_msg += f"\n\n💡 Для категории '{filter_value}': проверьте статистику данных перед обучением."
+        
+        raise ValueError(error_msg)
+    
+    # Дополнительная проверка для недельной агрегации
+    if total_rows < 8 and filter_column is not None:
+        logger.warning(f"⚠️ Очень мало данных: {total_rows} строк. Для недельной агрегации рекомендуется минимум 15-20 недель.")
+    
     # Fit the model
-    logger.info("Fitting Prophet model...")
-    model.fit(df_prophet_train)
-    logger.info("Model fitted successfully")
+    logger.info(f"Fitting Prophet model on {valid_rows} valid rows ({total_rows} total)...")
+    try:
+        model.fit(df_prophet_train)
+        logger.info("Model fitted successfully")
+    except Exception as e:
+        error_str = str(e)
+        if "less than 2 non-NaN rows" in error_str or "Dataframe has less than 2" in error_str:
+            raise ValueError(
+                f"⚠️ Prophet не может обучить модель: недостаточно данных.\n"
+                f"Валидных строк: {valid_rows}, Всего строк: {total_rows}\n"
+                f"Ошибка Prophet: {error_str}\n\n"
+                f"Попробуйте:\n"
+                f"1. ❌ ОТКЛЮЧИТЕ log-transform (снимите галочку)\n"
+                f"2. ✅ Включите skip_holdout=True (обучение на всех данных)\n"
+                f"3. ✅ Используйте daily агрегацию вместо weekly\n"
+                f"4. ✅ Выберите категорию с большим количеством данных\n"
+                f"5. ✅ Используйте shop-level прогноз (работает лучше)"
+            ) from e
+        else:
+            raise
     
     # Вычисление метрик (пропускается если skip_holdout)
     if skip_holdout:

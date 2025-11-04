@@ -90,3 +90,4 @@ for i, row in df_merged.head(10).iterrows():
     in_ci = 'YES' if (row['y'] >= row['yhat_lower'] and row['y'] <= row['yhat_upper']) else 'NO'
     print(f"{row['ds'].date()} {row['yhat']:<10.2f} {row['y']:<10.2f} {error:<10.2f} {in_ci:<6}")
 
+

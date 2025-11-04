@@ -89,3 +89,4 @@ else:
     print(f"   Прогноз: {df_forecast['ds'].min().date()} до {df_forecast['ds'].max().date()}")
     print(f"   Тест: {df_test['ds'].min().date()} до {df_test['ds'].max().date()}")
 
+

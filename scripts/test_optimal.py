@@ -25,3 +25,4 @@ print(f"MAE:  {result['metrics']['mae']:.2f}")
 print(f"RMSE: {result['metrics']['rmse']:.2f}")
 print(f"MAPE: {result['metrics']['mape']:.2f}%")
 
+

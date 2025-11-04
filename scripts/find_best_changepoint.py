@@ -53,3 +53,4 @@ for r in results:
 
 print(f"\nРекомендуется: changepoint_prior_scale = {results[0]['changepoint']}")
 
+
