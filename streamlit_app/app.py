@@ -63,8 +63,33 @@ if 'model_comparison' not in st.session_state:
 # FastAPI backend URL
 FASTAPI_URL = os.getenv("FASTAPI_URL", "http://localhost:8888")
 
-# Sidebar: Health check
+# Sidebar: Mode selection and Health check
 with st.sidebar:
+    st.header("⚙️ Режим работы")
+    
+    # Режим работы: Обычный или Продвинутый
+    if 'ui_mode' not in st.session_state:
+        st.session_state.ui_mode = "simple"  # По умолчанию простой режим
+    
+    ui_mode = st.radio(
+        "Выберите режим:",
+        options=["simple", "advanced"],
+        format_func=lambda x: {
+            "simple": "📱 Обычный (минимум параметров)",
+            "advanced": "🔧 Продвинутый (все параметры)"
+        }[x],
+        index=0 if st.session_state.ui_mode == "simple" else 1,
+        help="Обычный режим: автоматизированный интерфейс с оптимальными настройками. Продвинутый режим: полный контроль над всеми параметрами."
+    )
+    st.session_state.ui_mode = ui_mode
+    
+    if ui_mode == "simple":
+        st.info("💡 **Обычный режим**: Параметры настроены автоматически. Просто загрузите данные и получите прогноз!")
+    else:
+        st.info("💡 **Продвинутый режим**: Полный контроль над всеми параметрами модели.")
+    
+    st.markdown("---")
+    
     st.header("Статус API")
     
     # Check API health with better error handling
@@ -157,147 +182,377 @@ with st.sidebar:
           Контролирует, насколько сильно модель учитывает сезонные паттерны.
         """)
 
-# File uploader
-st.header("📁 Шаг 1: Загрузка данных")
-uploaded_file = st.file_uploader("Загрузите CSV файл с данными о продажах", type=["csv"], 
-                                 help="CSV файл должен содержать колонки: Sale_Date, Product_ID, Product_Category, Unit_Price, Discount, Quantity_Sold")
+# Determine UI mode
+ui_mode = st.session_state.get('ui_mode', 'simple')
 
-if uploaded_file is not None:
-    # Display raw data preview
-    bytes_data = uploaded_file.getvalue()
-    df_raw = pd.read_csv(io.StringIO(bytes_data.decode("utf-8")))
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Предпросмотр исходных данных")
-        st.dataframe(df_raw.head(10))
-    
-    with col2:
-        st.subheader("Обнаруженные колонки")
-        st.write(f"Колонки: {', '.join(df_raw.columns.tolist())}")
-        st.write(f"Всего строк: {len(df_raw)}")
-    
-    # Upload file to backend
-    if st.button("📤 Загрузить в Backend", help="Загружает CSV файл в backend API"):
-        try:
-            files = {"file": (uploaded_file.name, bytes_data, "text/csv")}
-            response = requests.post(f"{FASTAPI_URL}/upload", files=files, timeout=30)
-            
-            if response.status_code == 200:
-                result = response.json()
-                st.session_state.uploaded_file_path = result["file_path"]
-                st.success(f"✅ Файл успешно загружен: {result['file_path']}")
-            else:
-                st.error(f"❌ Ошибка загрузки: {response.text}")
-        except Exception as e:
-            st.error(f"❌ Ошибка при загрузке файла: {str(e)}")
+# Инициализируем распределенный прогноз по умолчанию для простого режима
+if ui_mode == "simple":
+    if 'use_distributed_forecast' not in st.session_state:
+        st.session_state.use_distributed_forecast = True  # По умолчанию включен распределенный прогноз
+    if 'selected_aggregation_level' not in st.session_state:
+        st.session_state.selected_aggregation_level = "category"  # Устанавливаем уровень на category
 
-# Preprocess section
-st.header("⚙️ Шаг 2: Предобработка данных")
-if st.session_state.uploaded_file_path:
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.info(f"📄 Файл готов: {st.session_state.uploaded_file_path}")
-    with col2:
-        force_weekly = st.checkbox("Принудительная недельная агрегация", 
-                                  help="Принудительно использовать недельную агрегацию независимо от плотности данных")
+# ОБЫЧНЫЙ РЕЖИМ: Упрощенный интерфейс
+if ui_mode == "simple":
+    st.header("📱 Обычный режим: Автоматизированный прогноз")
+    st.info("💡 **Автоматический режим**: Все параметры настроены оптимально. Просто загрузите данные и получите прогноз!")
     
-    if st.button("🔄 Предобработать данные", help="Обрабатывает загруженный CSV, валидирует данные и генерирует агрегаты по магазинам/категориям"):
-        # Check API before processing
-        try:
-            health_check = requests.get(f"{FASTAPI_URL}/health", timeout=3)
-            if health_check.status_code != 200:
-                st.error(f"❌ API недоступен (код {health_check.status_code}). Убедитесь, что FastAPI запущен.")
-                st.stop()
-        except requests.exceptions.ConnectionError:
-            st.error(f"❌ Не удалось подключиться к API на {FASTAPI_URL}")
-            st.info("💡 Запустите FastAPI: `python -m app.main` или `uvicorn app.main:app --reload --port 8888`")
-            st.stop()
-        except Exception as e:
-            st.warning(f"⚠️ Не удалось проверить статус API: {str(e)}")
-            st.info("💡 Продолжаем попытку предобработки...")
+    # Шаг 1: Загрузка файла
+    st.subheader("📁 Шаг 1: Загрузка данных")
+    uploaded_file = st.file_uploader(
+        "Загрузите CSV файл с данными о продажах", 
+        type=["csv"],
+        key="file_uploader_simple",
+        help="CSV файл должен содержать колонки: Sale_Date, Product_ID, Product_Category, Unit_Price, Discount, Quantity_Sold"
+    )
+    
+    if uploaded_file is not None:
+        # Display raw data preview
+        bytes_data = uploaded_file.getvalue()
+        df_raw = pd.read_csv(io.StringIO(bytes_data.decode("utf-8")))
         
-        try:
-            payload = {
-                "file_path": st.session_state.uploaded_file_path,
-                "force_weekly": force_weekly
-            }
-            with st.spinner("Предобработка данных... Это может занять некоторое время."):
-                response = requests.post(f"{FASTAPI_URL}/preprocess", json=payload, timeout=120)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Предпросмотр данных")
+            st.dataframe(df_raw.head(10))
+        
+        with col2:
+            st.subheader("Информация")
+            st.write(f"Колонки: {', '.join(df_raw.columns.tolist())}")
+            st.write(f"Всего строк: {len(df_raw)}")
+        
+        # Кнопка "Обучить" - выполняет все действия автоматически
+        if st.button("🚀 Обучить модель (автоматически)", type="primary", help="Автоматически выполнит: загрузку в бэк, предобработку и обучение"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             
-            if response.status_code == 200:
-                result = response.json()
-                st.session_state.preprocessed_shop_csv = result["shop_csv"]
-                st.session_state.preprocessed_category_csv = result["category_csv"]
-                st.session_state.preprocessed_product_csv = result.get("product_csv")
-                st.session_state.preprocessing_stats = result["stats"]
+            try:
+                # Шаг 1: Загрузка в бэк
+                status_text.text("📤 Шаг 1/3: Загрузка файла в backend...")
+                progress_bar.progress(10)
                 
-                st.success("✅ Данные успешно предобработаны!")
+                files = {"file": (uploaded_file.name, bytes_data, "text/csv")}
+                upload_response = requests.post(f"{FASTAPI_URL}/upload", files=files, timeout=30)
                 
-                # Show stats
-                st.subheader("📊 Статистика предобработки")
+                if upload_response.status_code != 200:
+                    st.error(f"❌ Ошибка загрузки файла: {upload_response.text}")
+                    st.stop()
                 
-                stats = result["stats"]
-                agg_suggestion = result.get("aggregation_suggestion", {})
+                upload_result = upload_response.json()
+                st.session_state.uploaded_file_path = upload_result["file_path"]
+                progress_bar.progress(30)
                 
+                # Шаг 2: Предобработка
+                status_text.text("⚙️ Шаг 2/3: Предобработка данных...")
+                progress_bar.progress(40)
+                
+                preprocess_payload = {
+                    "file_path": st.session_state.uploaded_file_path,
+                    "force_weekly": False  # Автоматически определяется
+                }
+                
+                preprocess_response = requests.post(f"{FASTAPI_URL}/preprocess", json=preprocess_payload, timeout=120)
+                
+                if preprocess_response.status_code != 200:
+                    st.error(f"❌ Ошибка предобработки: {preprocess_response.text}")
+                    st.stop()
+                
+                preprocess_result = preprocess_response.json()
+                st.session_state.preprocessed_shop_csv = preprocess_result["shop_csv"]
+                st.session_state.preprocessed_category_csv = preprocess_result["category_csv"]
+                st.session_state.preprocessed_product_csv = preprocess_result.get("product_csv")
+                st.session_state.preprocessing_stats = preprocess_result["stats"]
+                progress_bar.progress(60)
+                
+                # Шаг 3: Обучение shop-level модели
+                status_text.text("🎯 Шаг 3/3: Обучение shop-level модели...")
+                progress_bar.progress(70)
+                
+                train_payload = {
+                    "shop_csv": st.session_state.preprocessed_shop_csv,
+                    "model_out": "models/prophet_model.pkl",
+                    "include_regressors": False,  # НЕ используем регрессоры в простом режиме
+                    "log_transform": True,  # Включено для shop-level
+                    "interval_width": 0.95,
+                    "holdout_frac": 0.2,
+                    "changepoint_prior_scale": 0.05,
+                    "seasonality_prior_scale": 10.0,
+                    "seasonality_mode": "additive",
+                    "auto_tune": True,  # Включен автотюн для автоматического подбора параметров
+                    "skip_holdout": True,  # Обучаем на ВСЕХ данных для прогноза на будущее
+                    "filter_column": None,
+                    "filter_value": None
+                }
+                
+                train_response = requests.post(f"{FASTAPI_URL}/train", json=train_payload, timeout=1800)  # Увеличено до 30 минут для автотюна
+                
+                if train_response.status_code != 200:
+                    st.error(f"❌ Ошибка обучения модели: {train_response.text}")
+                    st.stop()
+                
+                train_result = train_response.json()
+                st.session_state.trained_model_path = train_result["model_path"]
+                st.session_state.training_metrics = train_result["metrics"]
+                st.session_state.selected_aggregation_level = "shop"
+                progress_bar.progress(100)
+                status_text.text("✅ Обучение завершено!")
+                
+                st.success("✅ **Модель успешно обучена!** Shop-level модель готова для прогноза.")
+                
+                # Показываем краткую статистику
+                stats = preprocess_result["stats"]
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("Всего строк (исходных)", stats.get("n_rows_raw", "N/A"))
-                    st.metric("Строк после очистки", stats.get("n_rows_clean", "N/A"))
-                    st.metric("Уникальных дат", stats.get("n_unique_dates", "N/A"))
-                
+                    st.metric("Всего строк", stats.get("n_rows_raw", "N/A"))
                 with col2:
-                    st.metric("Начало периода", stats.get("date_min", "N/A")[:10] if stats.get("date_min") else "N/A")
-                    st.metric("Конец периода", stats.get("date_max", "N/A")[:10] if stats.get("date_max") else "N/A")
-                    st.metric("Дубликатов удалено", stats.get("duplicates_removed", 0))
-                
+                    st.metric("Категорий", stats.get("unique_categories", "N/A"))
                 with col3:
-                    freq_used = stats.get("freq_used", "D")
-                    freq_icon = "📅" if freq_used == "D" else "📆"
-                    st.metric("Частота агрегации", f"{freq_icon} {freq_used}")
-                    
-                    if agg_suggestion:
-                        st.info(f"💡 Рекомендация: {agg_suggestion.get('freq', 'D')} - {agg_suggestion.get('reason', '')}")
+                    if train_result.get("metrics", {}).get("mape"):
+                        mape_val = train_result["metrics"]["mape"]
+                        st.metric("MAPE", f"{mape_val:.2f}%")
+                    else:
+                        st.metric("MAPE", "N/A")
                 
-                # Show available aggregation levels
-                if stats.get("unique_categories", 0) > 0 or stats.get("unique_products", 0) > 0:
-                    st.info(f"📊 Доступные уровни агрегации: Магазин (1), Категории ({stats.get('unique_categories', 0)}), Товары ({stats.get('unique_products', 0)})")
+            except Exception as e:
+                st.error(f"❌ Ошибка: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
+                st.stop()
+        
+        # Кнопка "Получить прогноз" - распределенный прогноз по всем категориям
+        if st.session_state.trained_model_path and st.session_state.preprocessed_category_csv:
+            st.subheader("🔮 Шаг 2: Получить прогноз по всем категориям")
+            
+            horizon_auto = st.number_input(
+                "Горизонт прогноза (дней)",
+                min_value=1,
+                max_value=365,
+                value=30,  # По умолчанию 30 дней
+                step=1,
+                key="horizon_auto",
+                help="На сколько дней вперед нужен прогноз"
+            )
+            
+            if st.button("📊 Получить прогноз по всем категориям", type="primary", help="Генерирует распределенный прогноз для всех категорий"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
                 
-                if stats.get("warning"):
-                    st.warning(f"⚠️ {stats['warning']}")
-                
-                # Show detailed stats
-                with st.expander("📋 Детальная статистика"):
-                    st.json(stats)
-            elif response.status_code == 404:
-                st.error(f"❌ Файл не найден: {response.text}")
-            elif response.status_code == 400:
-                st.error(f"❌ Ошибка валидации данных: {response.text}")
                 try:
-                    error_detail = response.json().get("detail", response.text)
-                    st.error(f"Детали: {error_detail}")
-                except:
-                    st.error(f"Ответ сервера: {response.text}")
-            elif response.status_code == 500:
-                st.error(f"❌ Внутренняя ошибка сервера: {response.text}")
-                st.info("💡 Проверьте логи FastAPI для подробностей")
-            else:
-                st.error(f"❌ Ошибка предобработки (код {response.status_code}): {response.text}")
-        except requests.exceptions.Timeout:
-            st.error("❌ Таймаут при предобработке (превышено 120 секунд)")
-            st.info("💡 Попробуйте снова или проверьте размер файла")
-        except requests.exceptions.ConnectionError:
-            st.error(f"❌ Потеряно соединение с API во время предобработки")
-            st.info(f"💡 Убедитесь, что FastAPI все еще работает на {FASTAPI_URL}")
-        except Exception as e:
-            st.error(f"❌ Ошибка при предобработке данных: {str(e)}")
-            st.info("💡 Проверьте, что API запущен и доступен")
+                    # Генерируем shop-level прогноз
+                    status_text.text("🔮 Генерация shop-level прогноза...")
+                    progress_bar.progress(20)
+                    
+                    shop_predict_payload = {
+                        "model_path": st.session_state.trained_model_path,
+                        "horizon": int(horizon_auto),
+                        "log_transform": True,  # Включен log-transform для генерации прогноза
+                        "smooth_transition": True,
+                        "future_regressor_strategy": "ffill",
+                        "last_known_regressors_csv": st.session_state.preprocessed_shop_csv,
+                        "smooth_days": 21,
+                        "smooth_alpha": 0.95,
+                        "max_change_pct": 0.01
+                    }
+                    
+                    shop_predict_response = requests.post(f"{FASTAPI_URL}/predict", json=shop_predict_payload, timeout=120)
+                    
+                    if shop_predict_response.status_code != 200:
+                        st.error(f"❌ Ошибка генерации shop-level прогноза: {shop_predict_response.text}")
+                        st.stop()
+                    
+                    shop_predict_result = shop_predict_response.json()
+                    shop_forecast_csv = shop_predict_result["forecast_csv_path"]
+                    progress_bar.progress(50)
+                    
+                    # Распределяем по категориям
+                    status_text.text("📊 Распределение прогноза по категориям...")
+                    progress_bar.progress(70)
+                    
+                    distributed_payload = {
+                        "shop_forecast_csv": shop_forecast_csv,
+                        "category_csv": st.session_state.preprocessed_category_csv,
+                        "horizon_days": int(horizon_auto)
+                    }
+                    
+                    distributed_response = requests.post(f"{FASTAPI_URL}/predict_category_distributed", json=distributed_payload, timeout=120)
+                    
+                    if distributed_response.status_code != 200:
+                        st.error(f"❌ Ошибка распределения прогноза: {distributed_response.text}")
+                        st.stop()
+                    
+                    distributed_result = distributed_response.json()
+                    st.session_state.forecast_data = distributed_result["forecast"]
+                    st.session_state.forecast_csv_path = distributed_result["forecast_csv_path"]
+                    st.session_state.forecast_is_distributed = True
+                    st.session_state.use_distributed_forecast = True
+                    progress_bar.progress(100)
+                    status_text.text("✅ Прогноз готов!")
+                    
+                    n_cats = distributed_result.get('n_categories', 0)
+                    st.success(f"✅ **Прогноз успешно сгенерирован!** Прогноз для {n_cats} категорий на {horizon_auto} дней.")
+                    
+                    # Автоматически показываем визуализацию ниже
+                    st.session_state.show_forecast_viz = True
+                    
+                except Exception as e:
+                    st.error(f"❌ Ошибка: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
+                    st.stop()
+    
+    # Показываем визуализацию если прогноз готов
+    if st.session_state.get('show_forecast_viz', False) and st.session_state.forecast_data:
+        st.markdown("---")
+        st.subheader("📈 Визуализация прогноза")
+        # Визуализация будет показана ниже в общем блоке
+        
+# ПРОДВИНУТЫЙ РЕЖИМ: Полный интерфейс
+else:
+    # File uploader (только для продвинутого режима)
+    st.header("📁 Шаг 1: Загрузка данных")
+    uploaded_file = st.file_uploader(
+        "Загрузите CSV файл с данными о продажах", 
+        type=["csv"],
+        key="file_uploader_advanced",
+        help="CSV файл должен содержать колонки: Sale_Date, Product_ID, Product_Category, Unit_Price, Discount, Quantity_Sold"
+    )
+    
+    if uploaded_file is not None:
+        # Display raw data preview
+        bytes_data = uploaded_file.getvalue()
+        df_raw = pd.read_csv(io.StringIO(bytes_data.decode("utf-8")))
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Предпросмотр исходных данных")
+            st.dataframe(df_raw.head(10))
+        
+        with col2:
+            st.subheader("Обнаруженные колонки")
+            st.write(f"Колонки: {', '.join(df_raw.columns.tolist())}")
+            st.write(f"Всего строк: {len(df_raw)}")
+        
+        # Upload file to backend
+        if st.button("📤 Загрузить в Backend", key="upload_button_advanced", help="Загружает CSV файл в backend API"):
+            try:
+                files = {"file": (uploaded_file.name, bytes_data, "text/csv")}
+                response = requests.post(f"{FASTAPI_URL}/upload", files=files, timeout=30)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    st.session_state.uploaded_file_path = result["file_path"]
+                    st.success(f"✅ Файл успешно загружен: {result['file_path']}")
+                else:
+                    st.error(f"❌ Ошибка загрузки: {response.text}")
+            except Exception as e:
+                st.error(f"❌ Ошибка при загрузке файла: {str(e)}")
+    
+    # Preprocess section (только для продвинутого режима)
+    st.header("⚙️ Шаг 2: Предобработка данных")
+    if st.session_state.uploaded_file_path:
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.info(f"📄 Файл готов: {st.session_state.uploaded_file_path}")
+        with col2:
+            force_weekly = st.checkbox("Принудительная недельная агрегация", 
+                                      help="Принудительно использовать недельную агрегацию независимо от плотности данных")
+        
+        if st.button("🔄 Предобработать данные", help="Обрабатывает загруженный CSV, валидирует данные и генерирует агрегаты по магазинам/категориям"):
+            # Check API before processing
+            try:
+                health_check = requests.get(f"{FASTAPI_URL}/health", timeout=3)
+                if health_check.status_code != 200:
+                    st.error(f"❌ API недоступен (код {health_check.status_code}). Убедитесь, что FastAPI запущен.")
+                    st.stop()
+            except requests.exceptions.ConnectionError:
+                st.error(f"❌ Не удалось подключиться к API на {FASTAPI_URL}")
+                st.info("💡 Запустите FastAPI: `python -m app.main` или `uvicorn app.main:app --reload --port 8888`")
+                st.stop()
+            except Exception as e:
+                st.warning(f"⚠️ Не удалось проверить статус API: {str(e)}")
+                st.info("💡 Продолжаем попытку предобработки...")
+            
+            try:
+                payload = {
+                    "file_path": st.session_state.uploaded_file_path,
+                    "force_weekly": force_weekly
+                }
+                with st.spinner("Предобработка данных... Это может занять некоторое время."):
+                    response = requests.post(f"{FASTAPI_URL}/preprocess", json=payload, timeout=120)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    st.session_state.preprocessed_shop_csv = result["shop_csv"]
+                    st.session_state.preprocessed_category_csv = result["category_csv"]
+                    st.session_state.preprocessed_product_csv = result.get("product_csv")
+                    st.session_state.preprocessing_stats = result["stats"]
+                    
+                    st.success("✅ Данные успешно предобработаны!")
+                    
+                    # Show stats
+                    st.subheader("📊 Статистика предобработки")
+                    
+                    stats = result["stats"]
+                    agg_suggestion = result.get("aggregation_suggestion", {})
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Всего строк (исходных)", stats.get("n_rows_raw", "N/A"))
+                        st.metric("Строк после очистки", stats.get("n_rows_clean", "N/A"))
+                        st.metric("Уникальных дат", stats.get("n_unique_dates", "N/A"))
+                    
+                    with col2:
+                        st.metric("Начало периода", stats.get("date_min", "N/A")[:10] if stats.get("date_min") else "N/A")
+                        st.metric("Конец периода", stats.get("date_max", "N/A")[:10] if stats.get("date_max") else "N/A")
+                        st.metric("Дубликатов удалено", stats.get("duplicates_removed", 0))
+                    
+                    with col3:
+                        freq_used = stats.get("freq_used", "D")
+                        freq_icon = "📅" if freq_used == "D" else "📆"
+                        st.metric("Частота агрегации", f"{freq_icon} {freq_used}")
+                        
+                        if agg_suggestion:
+                            st.info(f"💡 Рекомендация: {agg_suggestion.get('freq', 'D')} - {agg_suggestion.get('reason', '')}")
+                    
+                    # Show available aggregation levels
+                    if stats.get("unique_categories", 0) > 0 or stats.get("unique_products", 0) > 0:
+                        st.info(f"📊 Доступные уровни агрегации: Магазин (1), Категории ({stats.get('unique_categories', 0)}), Товары ({stats.get('unique_products', 0)})")
+                    
+                    if stats.get("warning"):
+                        st.warning(f"⚠️ {stats['warning']}")
+                    
+                    # Show detailed stats
+                    with st.expander("📋 Детальная статистика"):
+                        st.json(stats)
+                elif response.status_code == 404:
+                    st.error(f"❌ Файл не найден: {response.text}")
+                elif response.status_code == 400:
+                    st.error(f"❌ Ошибка валидации данных: {response.text}")
+                    try:
+                        error_detail = response.json().get("detail", response.text)
+                        st.error(f"Детали: {error_detail}")
+                    except:
+                        st.error(f"Ответ сервера: {response.text}")
+                elif response.status_code == 500:
+                    st.error(f"❌ Внутренняя ошибка сервера: {response.text}")
+                    st.info("💡 Проверьте логи FastAPI для подробностей")
+                else:
+                    st.error(f"❌ Ошибка предобработки (код {response.status_code}): {response.text}")
+            except requests.exceptions.Timeout:
+                st.error("❌ Таймаут при предобработке (превышено 120 секунд)")
+                st.info("💡 Попробуйте снова или проверьте размер файла")
+            except requests.exceptions.ConnectionError:
+                st.error(f"❌ Потеряно соединение с API во время предобработки")
+                st.info(f"💡 Убедитесь, что FastAPI все еще работает на {FASTAPI_URL}")
+            except Exception as e:
+                st.error(f"❌ Ошибка при предобработке данных: {str(e)}")
+                st.info("💡 Проверьте, что API запущен и доступен")
 
-# Train section
-st.header("🎯 Шаг 3: Обучение модели")
-if st.session_state.preprocessed_shop_csv:
-    # Level of aggregation selection
-    aggregation_level = st.session_state.selected_aggregation_level
+    # Train section (только для продвинутого режима)
+    st.header("🎯 Шаг 3: Обучение модели")
+    if st.session_state.preprocessed_shop_csv:
+        # Level of aggregation selection
+        aggregation_level = st.session_state.selected_aggregation_level
     with st.expander("📊 Выбор уровня агрегации", expanded=True):
         aggregation_level = st.radio(
             "Выберите уровень агрегации для обучения:",
@@ -1089,153 +1344,154 @@ if st.session_state.preprocessed_shop_csv:
                 except Exception as e:
                     st.error(f"❌ Ошибка при выполнении диагностики: {str(e)}")
 
-# Evaluate section
-st.header("📊 Шаг 4: Оценка модели (Кросс-валидация)")
-if st.session_state.preprocessed_shop_csv:
-    with st.expander("🔍 Конфигурация кросс-валидации", expanded=False):
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            initial_days = st.number_input(
-                "Начальный период обучения (дней)",
-                min_value=30,
-                value=180,
-                step=30,
-                help="Количество дней для начального периода обучения в скользящей кросс-валидации"
-            )
-        
-        with col2:
-            horizon_days = st.number_input(
-                "Горизонт прогноза (дней)",
-                min_value=1,
-                value=30,
-                step=5,
-                help="Количество дней для прогноза в каждом шаге кросс-валидации"
-            )
-        
-        with col3:
-            period_days = st.number_input(
-                "Период сдвига окна (дней)",
-                min_value=1,
-                value=30,
-                step=5,
-                help="Количество дней, на которое сдвигается окно между шагами кросс-валидации"
-            )
-        
-        cv_include_regressors = st.checkbox(
-            "Использовать регрессоры для CV",
-            value=False,
-            help="Включить регрессоры в кросс-валидацию (должно совпадать с конфигурацией обучения)"
-        )
-        
-        cv_log_transform = st.checkbox(
-            "Применить log-transform для CV",
-            value=False,
-            help="Применить log-transform в кросс-валидации (должно совпадать с конфигурацией обучения)"
-        )
-    
-    if st.button("📈 Запустить кросс-валидацию", help="Выполняет скользящую кросс-валидацию для оценки производительности модели"):
-        try:
-            payload = {
-                "shop_csv": st.session_state.preprocessed_shop_csv,
-                "initial_days": initial_days,
-                "horizon_days": horizon_days,
-                "period_days": period_days,
-                "include_regressors": cv_include_regressors,
-                "log_transform": cv_log_transform
-            }
+# Evaluate section (только для продвинутого режима)
+if ui_mode == "advanced":
+    st.header("📊 Шаг 4: Оценка модели (Кросс-валидация)")
+    if st.session_state.preprocessed_shop_csv:
+        with st.expander("🔍 Конфигурация кросс-валидации", expanded=False):
+            col1, col2, col3 = st.columns(3)
             
-            with st.spinner("Выполняется кросс-валидация... Это может занять несколько минут."):
-                response = requests.post(f"{FASTAPI_URL}/evaluate", json=payload, timeout=600)
+            with col1:
+                initial_days = st.number_input(
+                    "Начальный период обучения (дней)",
+                    min_value=30,
+                    value=180,
+                    step=30,
+                    help="Количество дней для начального периода обучения в скользящей кросс-валидации"
+                )
             
-            if response.status_code == 200:
-                result = response.json()
-                st.session_state.cv_results = result
-                
-                st.success("✅ Кросс-валидация завершена!")
-                
-                # Display aggregate metrics
-                st.subheader("📊 Результаты кросс-валидации")
-                
-                metrics = result["metrics"]
-                summary = result["summary"]
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("MAE", f"{summary['mae_mean']:.2f}", f"±{summary['mae_std']:.2f}")
-                with col2:
-                    st.metric("RMSE", f"{summary['rmse_mean']:.2f}", f"±{summary['rmse_std']:.2f}")
-                with col3:
-                    st.metric("MAPE", f"{summary['mape_mean']:.2f}%", f"±{summary['mape_std']:.2f}%")
-                
-                st.info(f"📊 Количество шагов CV: {result['n_cv_steps']}")
-                st.info(f"💾 Прогнозы сохранены в: {result['cv_predictions_csv']}")
-                
-                # Plot CV results
+            with col2:
+                horizon_days = st.number_input(
+                    "Горизонт прогноза (дней)",
+                    min_value=1,
+                    value=30,
+                    step=5,
+                    help="Количество дней для прогноза в каждом шаге кросс-валидации"
+                )
+            
+            with col3:
+                period_days = st.number_input(
+                    "Период сдвига окна (дней)",
+                    min_value=1,
+                    value=30,
+                    step=5,
+                    help="Количество дней, на которое сдвигается окно между шагами кросс-валидации"
+                )
+            
+            cv_include_regressors = st.checkbox(
+                "Использовать регрессоры для CV",
+                value=False,
+                help="Включить регрессоры в кросс-валидацию (должно совпадать с конфигурацией обучения)"
+            )
+            
+            cv_log_transform = st.checkbox(
+                "Применить log-transform для CV",
+                value=False,
+                help="Применить log-transform в кросс-валидации (должно совпадать с конфигурацией обучения)"
+            )
+            
+            if st.button("📈 Запустить кросс-валидацию", help="Выполняет скользящую кросс-валидацию для оценки производительности модели"):
                 try:
-                    df_cv = pd.read_csv(result['cv_predictions_csv'])
-                    df_cv['ds'] = pd.to_datetime(df_cv['ds'])
-                    df_cv = df_cv.sort_values('ds')
+                    payload = {
+                        "shop_csv": st.session_state.preprocessed_shop_csv,
+                        "initial_days": initial_days,
+                        "horizon_days": horizon_days,
+                        "period_days": period_days,
+                        "include_regressors": cv_include_regressors,
+                        "log_transform": cv_log_transform
+                    }
                     
-                    fig = go.Figure()
+                    with st.spinner("Выполняется кросс-валидация... Это может занять несколько минут."):
+                        response = requests.post(f"{FASTAPI_URL}/evaluate", json=payload, timeout=600)
                     
-                    # Plot actual
-                    fig.add_trace(go.Scatter(
-                        x=df_cv['ds'],
-                        y=df_cv['actual'],
-                        mode='lines+markers',
-                        name='Фактические продажи',
-                        line=dict(color='blue', width=2),
-                        marker=dict(size=4)
-                    ))
-                    
-                    # Plot predictions (grouped by CV step)
-                    if 'cv_step' in df_cv.columns:
-                        for step in sorted(df_cv['cv_step'].unique()):
-                            step_data = df_cv[df_cv['cv_step'] == step]
+                    if response.status_code == 200:
+                        result = response.json()
+                        st.session_state.cv_results = result
+                        
+                        st.success("✅ Кросс-валидация завершена!")
+                        
+                        # Display aggregate metrics
+                        st.subheader("📊 Результаты кросс-валидации")
+                        
+                        metrics = result["metrics"]
+                        summary = result["summary"]
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("MAE", f"{summary['mae_mean']:.2f}", f"±{summary['mae_std']:.2f}")
+                        with col2:
+                            st.metric("RMSE", f"{summary['rmse_mean']:.2f}", f"±{summary['rmse_std']:.2f}")
+                        with col3:
+                            st.metric("MAPE", f"{summary['mape_mean']:.2f}%", f"±{summary['mape_std']:.2f}%")
+                        
+                        st.info(f"📊 Количество шагов CV: {result['n_cv_steps']}")
+                        st.info(f"💾 Прогнозы сохранены в: {result['cv_predictions_csv']}")
+                        
+                        # Plot CV results
+                        try:
+                            df_cv = pd.read_csv(result['cv_predictions_csv'])
+                            df_cv['ds'] = pd.to_datetime(df_cv['ds'])
+                            df_cv = df_cv.sort_values('ds')
+                            
+                            fig = go.Figure()
+                            
+                            # Plot actual
                             fig.add_trace(go.Scatter(
-                                x=step_data['ds'],
-                                y=step_data['predicted'],
+                                x=df_cv['ds'],
+                                y=df_cv['actual'],
                                 mode='lines+markers',
-                                name=f'Прогнозы (Шаг {step})',
-                                line=dict(color='red', width=1, dash='dash'),
-                                marker=dict(size=3)
+                                name='Фактические продажи',
+                                line=dict(color='blue', width=2),
+                                marker=dict(size=4)
                             ))
+                            
+                            # Plot predictions (grouped by CV step)
+                            if 'cv_step' in df_cv.columns:
+                                for step in sorted(df_cv['cv_step'].unique()):
+                                    step_data = df_cv[df_cv['cv_step'] == step]
+                                    fig.add_trace(go.Scatter(
+                                        x=step_data['ds'],
+                                        y=step_data['predicted'],
+                                        mode='lines+markers',
+                                        name=f'Прогнозы (Шаг {step})',
+                                        line=dict(color='red', width=1, dash='dash'),
+                                        marker=dict(size=3)
+                                    ))
+                            else:
+                                fig.add_trace(go.Scatter(
+                                    x=df_cv['ds'],
+                                    y=df_cv['predicted'],
+                                    mode='lines+markers',
+                                    name='Прогнозы',
+                                    line=dict(color='red', width=1, dash='dash'),
+                                    marker=dict(size=3)
+                                ))
+                            
+                            fig.update_layout(
+                                title="Результаты кросс-валидации: Фактические vs Прогнозируемые",
+                                xaxis_title="Дата",
+                                yaxis_title="Продажи",
+                                hovermode='x unified',
+                                height=500,
+                                showlegend=True
+                            )
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                        except Exception as e:
+                            st.warning(f"Не удалось построить график результатов CV: {str(e)}")
+                        
                     else:
-                        fig.add_trace(go.Scatter(
-                            x=df_cv['ds'],
-                            y=df_cv['predicted'],
-                            mode='lines+markers',
-                            name='Прогнозы',
-                            line=dict(color='red', width=1, dash='dash'),
-                            marker=dict(size=3)
-                        ))
-                    
-                    fig.update_layout(
-                        title="Результаты кросс-валидации: Фактические vs Прогнозируемые",
-                        xaxis_title="Дата",
-                        yaxis_title="Продажи",
-                        hovermode='x unified',
-                        height=500,
-                        showlegend=True
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
+                        st.error(f"❌ Ошибка кросс-валидации: {response.text}")
                 except Exception as e:
-                    st.warning(f"Не удалось построить график результатов CV: {str(e)}")
-                
-            else:
-                st.error(f"❌ Ошибка кросс-валидации: {response.text}")
-        except Exception as e:
-            st.error(f"❌ Ошибка при выполнении кросс-валидации: {str(e)}")
+                    st.error(f"❌ Ошибка при выполнении кросс-валидации: {str(e)}")
 
-# Predict section
-st.header("🔮 Шаг 5: Генерация прогноза")
-st.info("💡 **Прогноз на будущее:** Если модель была обучена с 'skip_holdout=True', прогноз будет сделан на даты **после** последней даты в обучающих данных. "
-       "Для использования сохраненной модели укажите путь к `.pkl` файлу ниже.")
+    # Predict section (только для продвинутого режима)
+    st.header("🔮 Шаг 5: Генерация прогноза")
+    st.info("💡 **Прогноз на будущее:** Если модель была обучена с 'skip_holdout=True', прогноз будет сделан на даты **после** последней даты в обучающих данных. "
+           "Для использования сохраненной модели укажите путь к `.pkl` файлу ниже.")
 
-# Заметный раздел для прогноза по категориям
-if st.session_state.preprocessed_category_csv:
+# Заметный раздел для прогноза по категориям (только для продвинутого режима)
+if ui_mode == "advanced" and st.session_state.preprocessed_category_csv:
     with st.expander("📁 ПРОГНОЗ ПО КАТЕГОРИЯМ (Распределенный метод - РЕКОМЕНДУЕТСЯ)", expanded=True):
         st.write("""
         **🎯 Распределенный прогноз категорий:**
@@ -1262,13 +1518,18 @@ if st.session_state.preprocessed_category_csv:
         else:
             st.session_state.use_distributed_forecast = False
 
+# Инициализируем model_info заранее
+model_info = ""
+
 if st.session_state.trained_model_path:
-    # Показываем информацию о текущей модели
+    # Инициализируем model_info
     model_info = f"🤖 Используется модель: `{st.session_state.trained_model_path}`"
     
-    # Показываем предупреждение если модель обучена с skip_holdout
-    if st.session_state.training_metrics and st.session_state.training_metrics.get('skip_holdout', False):
-        st.success("✅ Модель обучена на всех данных - готова для прогноза на реальное будущее!")
+    # Показываем информацию о текущей модели (только для продвинутого режима)
+    if ui_mode == "advanced":
+        # Показываем предупреждение если модель обучена с skip_holdout
+        if st.session_state.training_metrics and st.session_state.training_metrics.get('skip_holdout', False):
+            st.success("✅ Модель обучена на всех данных - готова для прогноза на реальное будущее!")
 else:
     # Позволяем загрузить сохраненную модель вручную
     st.subheader("📂 Использование сохраненной модели")
@@ -1310,35 +1571,40 @@ else:
         # Если модель не загружена, устанавливаем пустую модель_info
         model_info = "ℹ️ Модель не загружена. Обучите модель в разделе 'Шаг 3' или загрузите сохраненную модель выше."
 
-# Проверяем уровень агрегации для распределенного прогноза
-aggregation_level = st.session_state.get('selected_aggregation_level', 'shop')
-
-# Если есть сравнение моделей, показываем информацию о выбранной
-if st.session_state.trained_model_path:
-    if 'model_comparison' in st.session_state and st.session_state.model_comparison is not None:
-        df_comp = st.session_state.model_comparison
-        # Пытаемся определить, какая модель используется по пути
-        model_name_from_path = os.path.basename(st.session_state.trained_model_path).replace('.pkl', '')
-        
-        # Ищем метрики текущей модели
-        matching_models = df_comp[df_comp['model_name'].str.contains(model_name_from_path, case=False, na=False)]
-        if len(matching_models) == 0:
-            # Показываем лучшую модель
-            best_model = df_comp.iloc[0]
-            model_info += f"\n\n📊 **Лучшая модель из auto-tune**: {best_model['model_name']} "
-            model_info += f"(MAPE: {best_model['mape']:.2f}%, Coverage: {best_model['coverage']*100:.1f}%)"
-        else:
-            current_model = matching_models.iloc[0]
-            model_info += f"\n\n📊 **Метрики текущей модели**: MAPE: {current_model['mape']:.2f}%, "
-            model_info += f"Coverage: {current_model['coverage']*100:.1f}%"
-    else:
-        # Если есть метрики обучения, показываем их
-        if st.session_state.training_metrics:
-            mape_val = st.session_state.training_metrics.get('mape', 'N/A')
-            model_info += f"\n📊 MAPE: {mape_val:.2f}%" if isinstance(mape_val, (int, float)) else ""
+# Проверяем уровень агрегации для распределенного прогноза (только для продвинутого режима)
+if ui_mode == "advanced":
+    aggregation_level = st.session_state.get('selected_aggregation_level', 'shop')
     
-    # Показываем информацию о модели только если она загружена
+    # Если есть сравнение моделей, показываем информацию о выбранной
     if st.session_state.trained_model_path:
+        # model_info уже определена выше, но переопределяем если нужно
+        if not model_info:
+            model_info = f"🤖 Используется модель: `{st.session_state.trained_model_path}`"
+        
+        if 'model_comparison' in st.session_state and st.session_state.model_comparison is not None:
+            df_comp = st.session_state.model_comparison
+            # Пытаемся определить, какая модель используется по пути
+            model_name_from_path = os.path.basename(st.session_state.trained_model_path).replace('.pkl', '')
+            
+            # Ищем метрики текущей модели
+            matching_models = df_comp[df_comp['model_name'].str.contains(model_name_from_path, case=False, na=False)]
+            if len(matching_models) == 0:
+                # Показываем лучшую модель
+                best_model = df_comp.iloc[0]
+                model_info += f"\n\n📊 **Лучшая модель из auto-tune**: {best_model['model_name']} "
+                model_info += f"(MAPE: {best_model['mape']:.2f}%, Coverage: {best_model['coverage']*100:.1f}%)"
+            else:
+                current_model = matching_models.iloc[0]
+                model_info += f"\n\n📊 **Метрики текущей модели**: MAPE: {current_model['mape']:.2f}%, "
+                model_info += f"Coverage: {current_model['coverage']*100:.1f}%"
+        else:
+            # Если есть метрики обучения, показываем их
+            if st.session_state.training_metrics:
+                mape_val = st.session_state.training_metrics.get('mape', 'N/A')
+                if isinstance(mape_val, (int, float)):
+                    model_info += f"\n📊 MAPE: {mape_val:.2f}%"
+        
+        # Показываем информацию о модели только если она загружена и в продвинутом режиме
         st.info(model_info)
     
     col1, col2 = st.columns(2)
@@ -1672,267 +1938,139 @@ if st.session_state.trained_model_path:
                     st.error(f"❌ Ошибка генерации прогноза: {response.text}")
             except Exception as e:
                 st.error(f"❌ Ошибка при генерации прогноза: {str(e)}")
-    
-    # Display forecast visualization and table if forecast data exists
-    if st.session_state.forecast_data is not None and st.session_state.forecast_csv_path is not None:
-        # Загружаем прогноз из CSV для правильной обработки распределенного прогноза
-        try:
-            df_forecast_full = pd.read_csv(st.session_state.forecast_csv_path)
-            df_forecast_full['ds'] = pd.to_datetime(df_forecast_full['ds'])
+
+# Display forecast visualization and table if forecast data exists (для ОБОИХ режимов)
+if st.session_state.forecast_data is not None and st.session_state.forecast_csv_path is not None:
+    # Загружаем прогноз из CSV для правильной обработки распределенного прогноза
+    try:
+        df_forecast_full = pd.read_csv(st.session_state.forecast_csv_path)
+        df_forecast_full['ds'] = pd.to_datetime(df_forecast_full['ds'])
+        
+        # Проверяем, является ли это распределенным прогнозом категорий
+        is_distributed_category_forecast = 'category' in df_forecast_full.columns
+        
+        if is_distributed_category_forecast:
+            # Распределенный прогноз категорий - показываем отдельные графики
+            st.subheader("📈 Визуализация прогноза по категориям")
             
-            # Проверяем, является ли это распределенным прогнозом категорий
-            is_distributed_category_forecast = 'category' in df_forecast_full.columns
+            # Получаем список категорий
+            categories = sorted(df_forecast_full['category'].unique())
             
-            if is_distributed_category_forecast:
-                # Распределенный прогноз категорий - показываем отдельные графики
-                st.subheader("📈 Визуализация прогноза по категориям")
+            # Выбор категорий для отображения
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                display_mode = st.radio(
+                    "Режим отображения:",
+                    options=["top5", "selected", "all"],
+                    format_func=lambda x: {
+                        "top5": "📊 Топ-5 категорий (по среднему прогнозу)",
+                        "selected": "✅ Выбранные категории (чекбоксы)",
+                        "all": "📋 Все категории"
+                    }[x],
+                    index=2,  # По умолчанию показываем все категории
+                    help="Выберите какие категории показывать на графиках"
+                )
+            
+            with col2:
+                if display_mode == "all":
+                    st.info(f"Показано категорий: {len(categories)}")
+                elif display_mode == "top5":
+                    st.info("Показано категорий: 5")
+            
+            # Определяем какие категории показывать
+            if display_mode == "top5":
+                # Вычисляем средний прогноз для каждой категории
+                category_means = df_forecast_full.groupby('category')['yhat'].mean().sort_values(ascending=False)
+                selected_categories = category_means.head(5).index.tolist()
+                st.info(f"📊 Топ-5 категорий по среднему прогнозу: {', '.join(selected_categories)}")
+            elif display_mode == "selected":
+                # Чекбоксы для выбора категорий
+                st.write("**Выберите категории для отображения:**")
+                selected_categories = []
+                n_cols = 3
+                cols = st.columns(n_cols)
+                for idx, cat in enumerate(categories):
+                    col_idx = idx % n_cols
+                    with cols[col_idx]:
+                        if st.checkbox(cat, value=(idx < 5), key=f"cat_checkbox_{cat}"):
+                            selected_categories.append(cat)
+                if not selected_categories:
+                    st.warning("⚠️ Не выбрано ни одной категории! Выберите хотя бы одну.")
+                    selected_categories = categories[:5]  # Fallback на первые 5
+            else:
+                selected_categories = categories
+            
+            # Показываем графики для каждой выбранной категории
+            for category in selected_categories:
+                cat_forecast = df_forecast_full[df_forecast_full['category'] == category].copy()
+                cat_forecast = cat_forecast.sort_values('ds')
                 
-                # Получаем список категорий
-                categories = sorted(df_forecast_full['category'].unique())
-                
-                # Выбор категорий для отображения
-                col1, col2 = st.columns([2, 1])
-                with col1:
-                    display_mode = st.radio(
-                        "Режим отображения:",
-                        options=["top5", "selected", "all"],
-                        format_func=lambda x: {
-                            "top5": "📊 Топ-5 категорий (по среднему прогнозу)",
-                            "selected": "✅ Выбранные категории (чекбоксы)",
-                            "all": "📋 Все категории"
-                        }[x],
-                        index=0,
-                        help="Выберите какие категории показывать на графиках"
-                    )
-                
-                with col2:
-                    if display_mode == "all":
-                        st.info(f"Показано категорий: {len(categories)}")
-                    elif display_mode == "top5":
-                        st.info("Показано категорий: 5")
-                
-                # Определяем какие категории показывать
-                if display_mode == "top5":
-                    # Вычисляем средний прогноз для каждой категории
-                    category_means = df_forecast_full.groupby('category')['yhat'].mean().sort_values(ascending=False)
-                    selected_categories = category_means.head(5).index.tolist()
-                    st.info(f"📊 Топ-5 категорий по среднему прогнозу: {', '.join(selected_categories)}")
-                elif display_mode == "selected":
-                    # Чекбоксы для выбора категорий
-                    st.write("**Выберите категории для отображения:**")
-                    selected_categories = []
-                    n_cols = 3
-                    cols = st.columns(n_cols)
-                    for idx, cat in enumerate(categories):
-                        col_idx = idx % n_cols
-                        with cols[col_idx]:
-                            if st.checkbox(cat, value=(idx < 5), key=f"cat_checkbox_{cat}"):
-                                selected_categories.append(cat)
-                    if not selected_categories:
-                        st.warning("⚠️ Не выбрано ни одной категории! Выберите хотя бы одну.")
-                        selected_categories = categories[:5]  # Fallback на первые 5
-                else:
-                    selected_categories = categories
-                
-                # Показываем графики для каждой выбранной категории
-                for category in selected_categories:
-                    cat_forecast = df_forecast_full[df_forecast_full['category'] == category].copy()
-                    cat_forecast = cat_forecast.sort_values('ds')
-                    
-                    # Загружаем историю для этой категории
-                    cat_history = None
-                    if st.session_state.preprocessed_category_csv:
-                        try:
-                            df_history_all = pd.read_csv(st.session_state.preprocessed_category_csv)
-                            df_history_all['ds'] = pd.to_datetime(df_history_all['ds'])
-                            cat_history = df_history_all[df_history_all['category'] == category].copy()
-                            cat_history = cat_history.sort_values('ds')
-                            
-                            # Разделяем на train/test
-                            forecast_start = cat_forecast['ds'].min()
-                            cat_history_train = cat_history[cat_history['ds'] < forecast_start].copy()
-                            cat_history_test = cat_history[cat_history['ds'] >= forecast_start].copy()
-                        except Exception as e:
-                            logger.warning(f"Could not load history for {category}: {str(e)}")
-                            cat_history_train = None
-                            cat_history_test = None
-                    else:
+                # Загружаем историю для этой категории
+                cat_history = None
+                if st.session_state.preprocessed_category_csv:
+                    try:
+                        df_history_all = pd.read_csv(st.session_state.preprocessed_category_csv)
+                        df_history_all['ds'] = pd.to_datetime(df_history_all['ds'])
+                        cat_history = df_history_all[df_history_all['category'] == category].copy()
+                        cat_history = cat_history.sort_values('ds')
+                        
+                        # Разделяем на train/test
+                        forecast_start = cat_forecast['ds'].min()
+                        cat_history_train = cat_history[cat_history['ds'] < forecast_start].copy()
+                        cat_history_test = cat_history[cat_history['ds'] >= forecast_start].copy()
+                    except Exception as e:
+                        logger.warning(f"Could not load history for {category}: {str(e)}")
                         cat_history_train = None
                         cat_history_test = None
-                    
-                    # Создаем график для категории
-                    fig = go.Figure()
-                    
-                    # Исторические данные (период обучения)
-                    if cat_history_train is not None and not cat_history_train.empty:
-                        fig.add_trace(go.Scatter(
-                            x=cat_history_train['ds'],
-                            y=cat_history_train['y'],
-                            mode='lines',
-                            name='Исторические продажи (период обучения)',
-                            line=dict(color='blue', width=2)
-                        ))
-                    
-                    # Фактические продажи (тестовый период)
-                    if cat_history_test is not None and not cat_history_test.empty:
-                        fig.add_trace(go.Scatter(
-                            x=cat_history_test['ds'],
-                            y=cat_history_test['y'],
-                            mode='lines',
-                            name='Фактические продажи (тестовый период)',
-                            line=dict(color='green', width=2, dash='dash')
-                        ))
-                    
-                    # Прогноз
-                    fig.add_trace(go.Scatter(
-                        x=cat_forecast['ds'],
-                        y=cat_forecast['yhat'],
-                        mode='lines',
-                        name='Прогноз (будущее)',
-                        line=dict(color='red', width=2)
-                    ))
-                    
-                    # Доверительный интервал
-                    if 'yhat_lower' in cat_forecast.columns and 'yhat_upper' in cat_forecast.columns:
-                        fig.add_trace(go.Scatter(
-                            x=cat_forecast['ds'],
-                            y=cat_forecast['yhat_upper'],
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=False,
-                            hoverinfo='skip'
-                        ))
-                        fig.add_trace(go.Scatter(
-                            x=cat_forecast['ds'],
-                            y=cat_forecast['yhat_lower'],
-                            mode='lines',
-                            line=dict(width=0),
-                            fill='tonexty',
-                            fillcolor='rgba(255, 0, 0, 0.2)',
-                            name='Доверительный интервал',
-                            showlegend=True,
-                            hoverinfo='skip'
-                        ))
-                    
-                    fig.update_layout(
-                        title=f"Прогноз продаж: {category}",
-                        xaxis_title="Дата",
-                        yaxis_title="Продажи",
-                        hovermode='x unified',
-                        height=400,
-                        showlegend=True
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Краткая статистика по категории
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric(f"{category}: Средний прогноз", f"{cat_forecast['yhat'].mean():.1f}")
-                    with col2:
-                        st.metric("Минимум", f"{cat_forecast['yhat'].min():.1f}")
-                    with col3:
-                        st.metric("Максимум", f"{cat_forecast['yhat'].max():.1f}")
-                    with col4:
-                        st.metric("Дней прогноза", len(cat_forecast))
-                    
-                    st.markdown("---")
-                
-                # Общая таблица со всеми категориями
-                with st.expander("📋 Таблица прогноза для всех категорий", expanded=False):
-                    st.dataframe(df_forecast_full, use_container_width=True)
-                    
-            else:
-                # Обычный прогноз (shop-level или одна категория/товар)
-                # Используем существующую логику визуализации
-                df_forecast = df_forecast_full.copy()
-                
-                # Ensure non-negative values
-                if 'yhat' in df_forecast.columns:
-                    df_forecast['yhat'] = df_forecast['yhat'].clip(lower=0.0)
-                if 'yhat_lower' in df_forecast.columns:
-                    df_forecast['yhat_lower'] = df_forecast['yhat_lower'].clip(lower=0.0)
-                if 'yhat_upper' in df_forecast.columns:
-                    df_forecast['yhat_upper'] = df_forecast['yhat_upper'].clip(lower=0.0)
-                if 'yhat_lower' in df_forecast.columns and 'yhat_upper' in df_forecast.columns:
-                    df_forecast['yhat_upper'] = df_forecast[['yhat_upper', 'yhat_lower']].max(axis=1)
-                
-                # Plot forecast
-                st.subheader("📈 Визуализация прогноза")
-                
-                # Load history if available
-                df_history_train = None
-                df_history_test = None
-                aggregation_level = st.session_state.get('selected_aggregation_level', 'shop')
-                
-                if aggregation_level == "category":
-                    history_csv = st.session_state.preprocessed_category_csv
-                    history_filter_column = "category"
-                    history_filter_value = st.session_state.get('selected_filter_value')
-                elif aggregation_level == "product":
-                    history_csv = st.session_state.preprocessed_product_csv
-                    history_filter_column = "product_id"
-                    history_filter_value = st.session_state.get('selected_filter_value')
                 else:
-                    history_csv = st.session_state.preprocessed_shop_csv
-                    history_filter_column = None
-                    history_filter_value = None
+                    cat_history_train = None
+                    cat_history_test = None
                 
-                if history_csv:
-                    try:
-                        df_history = pd.read_csv(history_csv)
-                        df_history['ds'] = pd.to_datetime(df_history['ds'])
-                        
-                        if history_filter_column and history_filter_value and history_filter_column in df_history.columns:
-                            df_history = df_history[df_history[history_filter_column].astype(str) == str(history_filter_value)].copy()
-                        
-                        df_history = df_history.sort_values('ds')
-                        forecast_start = df_forecast['ds'].min()
-                        df_history_train = df_history[df_history['ds'] < forecast_start].copy()
-                        df_history_test = df_history[df_history['ds'] >= forecast_start].copy()
-                    except Exception as e:
-                        logger.error(f"Error loading history: {str(e)}")
-                
+                # Создаем график для категории
                 fig = go.Figure()
                 
-                if df_history_train is not None and not df_history_train.empty:
+                # Исторические данные (период обучения)
+                if cat_history_train is not None and not cat_history_train.empty:
                     fig.add_trace(go.Scatter(
-                        x=df_history_train['ds'],
-                        y=df_history_train['y'],
+                        x=cat_history_train['ds'],
+                        y=cat_history_train['y'],
                         mode='lines',
                         name='Исторические продажи (период обучения)',
                         line=dict(color='blue', width=2)
                     ))
                 
-                if df_history_test is not None and not df_history_test.empty:
+                # Фактические продажи (тестовый период)
+                if cat_history_test is not None and not cat_history_test.empty:
                     fig.add_trace(go.Scatter(
-                        x=df_history_test['ds'],
-                        y=df_history_test['y'],
+                        x=cat_history_test['ds'],
+                        y=cat_history_test['y'],
                         mode='lines',
                         name='Фактические продажи (тестовый период)',
                         line=dict(color='green', width=2, dash='dash')
                     ))
                 
+                # Прогноз
                 fig.add_trace(go.Scatter(
-                    x=df_forecast['ds'],
-                    y=df_forecast['yhat'],
+                    x=cat_forecast['ds'],
+                    y=cat_forecast['yhat'],
                     mode='lines',
                     name='Прогноз (будущее)',
                     line=dict(color='red', width=2)
                 ))
                 
-                if 'yhat_lower' in df_forecast.columns and 'yhat_upper' in df_forecast.columns:
+                # Доверительный интервал
+                if 'yhat_lower' in cat_forecast.columns and 'yhat_upper' in cat_forecast.columns:
                     fig.add_trace(go.Scatter(
-                        x=df_forecast['ds'],
-                        y=df_forecast['yhat_upper'],
+                        x=cat_forecast['ds'],
+                        y=cat_forecast['yhat_upper'],
                         mode='lines',
                         line=dict(width=0),
                         showlegend=False,
                         hoverinfo='skip'
                     ))
                     fig.add_trace(go.Scatter(
-                        x=df_forecast['ds'],
-                        y=df_forecast['yhat_lower'],
+                        x=cat_forecast['ds'],
+                        y=cat_forecast['yhat_lower'],
                         mode='lines',
                         line=dict(width=0),
                         fill='tonexty',
@@ -1942,27 +2080,158 @@ if st.session_state.trained_model_path:
                         hoverinfo='skip'
                     ))
                 
-                title = "Прогноз продаж"
-                if st.session_state.get('log_transform_used', False):
-                    title += " (Применен Log Transform)"
-                
                 fig.update_layout(
-                    title=title,
+                    title=f"Прогноз продаж: {category}",
                     xaxis_title="Дата",
                     yaxis_title="Продажи",
                     hovermode='x unified',
-                    height=500,
+                    height=400,
                     showlegend=True
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
                 
-                st.subheader("📋 Таблица прогноза")
-                st.dataframe(df_forecast, use_container_width=True)
-        except Exception as e:
-            st.error(f"❌ Ошибка при загрузке данных прогноза: {str(e)}")
-            import traceback
-            st.code(traceback.format_exc())
+                # Краткая статистика по категории
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric(f"{category}: Средний прогноз", f"{cat_forecast['yhat'].mean():.1f}")
+                with col2:
+                    st.metric("Минимум", f"{cat_forecast['yhat'].min():.1f}")
+                with col3:
+                    st.metric("Максимум", f"{cat_forecast['yhat'].max():.1f}")
+                with col4:
+                    st.metric("Дней прогноза", len(cat_forecast))
+                
+                st.markdown("---")
+            
+            # Общая таблица со всеми категориями
+            with st.expander("📋 Таблица прогноза для всех категорий", expanded=False):
+                st.dataframe(df_forecast_full, use_container_width=True)
+                
+        else:
+            # Обычный прогноз (shop-level или одна категория/товар)
+            # Используем существующую логику визуализации
+            df_forecast = df_forecast_full.copy()
+            
+            # Ensure non-negative values
+            if 'yhat' in df_forecast.columns:
+                df_forecast['yhat'] = df_forecast['yhat'].clip(lower=0.0)
+            if 'yhat_lower' in df_forecast.columns:
+                df_forecast['yhat_lower'] = df_forecast['yhat_lower'].clip(lower=0.0)
+            if 'yhat_upper' in df_forecast.columns:
+                df_forecast['yhat_upper'] = df_forecast['yhat_upper'].clip(lower=0.0)
+            if 'yhat_lower' in df_forecast.columns and 'yhat_upper' in df_forecast.columns:
+                df_forecast['yhat_upper'] = df_forecast[['yhat_upper', 'yhat_lower']].max(axis=1)
+            
+            # Plot forecast
+            st.subheader("📈 Визуализация прогноза")
+            
+            # Load history if available
+            df_history_train = None
+            df_history_test = None
+            aggregation_level = st.session_state.get('selected_aggregation_level', 'shop')
+            
+            if aggregation_level == "category":
+                history_csv = st.session_state.preprocessed_category_csv
+                history_filter_column = "category"
+                history_filter_value = st.session_state.get('selected_filter_value')
+            elif aggregation_level == "product":
+                history_csv = st.session_state.preprocessed_product_csv
+                history_filter_column = "product_id"
+                history_filter_value = st.session_state.get('selected_filter_value')
+            else:
+                history_csv = st.session_state.preprocessed_shop_csv
+                history_filter_column = None
+                history_filter_value = None
+            
+            if history_csv:
+                try:
+                    df_history = pd.read_csv(history_csv)
+                    df_history['ds'] = pd.to_datetime(df_history['ds'])
+                    
+                    if history_filter_column and history_filter_value and history_filter_column in df_history.columns:
+                        df_history = df_history[df_history[history_filter_column].astype(str) == str(history_filter_value)].copy()
+                    
+                    df_history = df_history.sort_values('ds')
+                    forecast_start = df_forecast['ds'].min()
+                    df_history_train = df_history[df_history['ds'] < forecast_start].copy()
+                    df_history_test = df_history[df_history['ds'] >= forecast_start].copy()
+                except Exception as e:
+                    logger.error(f"Error loading history: {str(e)}")
+            
+            fig = go.Figure()
+            
+            if df_history_train is not None and not df_history_train.empty:
+                fig.add_trace(go.Scatter(
+                    x=df_history_train['ds'],
+                    y=df_history_train['y'],
+                    mode='lines',
+                    name='Исторические продажи (период обучения)',
+                    line=dict(color='blue', width=2)
+                ))
+            
+            if df_history_test is not None and not df_history_test.empty:
+                fig.add_trace(go.Scatter(
+                    x=df_history_test['ds'],
+                    y=df_history_test['y'],
+                    mode='lines',
+                    name='Фактические продажи (тестовый период)',
+                    line=dict(color='green', width=2, dash='dash')
+                ))
+            
+            fig.add_trace(go.Scatter(
+                x=df_forecast['ds'],
+                y=df_forecast['yhat'],
+                mode='lines',
+                name='Прогноз (будущее)',
+                line=dict(color='red', width=2)
+            ))
+            
+            if 'yhat_lower' in df_forecast.columns and 'yhat_upper' in df_forecast.columns:
+                fig.add_trace(go.Scatter(
+                    x=df_forecast['ds'],
+                    y=df_forecast['yhat_upper'],
+                    mode='lines',
+                    line=dict(width=0),
+                    showlegend=False,
+                    hoverinfo='skip'
+                ))
+                fig.add_trace(go.Scatter(
+                    x=df_forecast['ds'],
+                    y=df_forecast['yhat_lower'],
+                    mode='lines',
+                    line=dict(width=0),
+                    fill='tonexty',
+                    fillcolor='rgba(255, 0, 0, 0.2)',
+                    name='Доверительный интервал',
+                    showlegend=True,
+                    hoverinfo='skip'
+                ))
+            
+            title = "Прогноз продаж"
+            if st.session_state.get('log_transform_used', False):
+                title += " (Применен Log Transform)"
+            
+            fig.update_layout(
+                title=title,
+                xaxis_title="Дата",
+                yaxis_title="Продажи",
+                hovermode='x unified',
+                height=500,
+                showlegend=True
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.subheader("📋 Таблица прогноза")
+            st.dataframe(df_forecast, use_container_width=True)
+    except Exception as e:
+        st.error(f"❌ Ошибка при загрузке данных прогноза: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
+    
+    # PDF отчет (только для продвинутого режима)
+    if ui_mode == "advanced":
         st.subheader("📥 Скачать PDF отчет")
         
         # Button to generate PDF
