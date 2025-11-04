@@ -49,10 +49,6 @@ if 'forecast_csv_path' not in st.session_state:
     st.session_state.forecast_csv_path = None
 if 'cv_results' not in st.session_state:
     st.session_state.cv_results = None
-if 'pdf_data' not in st.session_state:
-    st.session_state.pdf_data = None
-if 'pdf_filename' not in st.session_state:
-    st.session_state.pdf_filename = None
 if 'log_transform_used' not in st.session_state:
     st.session_state.log_transform_used = False
 if 'diagnostics' not in st.session_state:
@@ -714,7 +710,10 @@ else:
     else:
         # Shop-level обучение
         st.success("✅ **SHOP-LEVEL ОБУЧЕНИЕ:** Будет обучена модель для всего магазина (агрегат всех продаж)")
-        st.info(f"📊 Используются данные магазинов: `{selected_csv}`")
+        if selected_csv:
+            st.info(f"📊 Используются данные магазинов: `{selected_csv}`")
+        else:
+            st.warning("⚠️ Данные не загружены. Выполните предобработку данных в разделе 'Шаг 2: Предобработка данных'")
         st.info("💡 **Рекомендации для shop-level:**\n"
                 "- ✅ Log-transform: ВКЛЮЧЕНО (рекомендуется)\n"
                 "- ✅ Interval width: 0.95\n"
@@ -960,6 +959,13 @@ else:
     
     if st.button("🚀 Обучить модель", help="Обучает модель Prophet с выбранной конфигурацией"):
         try:
+            # Проверка наличия данных перед обучением
+            if not selected_csv:
+                st.error("❌ Данные не загружены или не обработаны. Пожалуйста:")
+                st.error("1. Загрузите CSV файл в разделе 'Шаг 1: Загрузка данных'")
+                st.error("2. Выполните предобработку данных в разделе 'Шаг 2: Предобработка данных'")
+                st.stop()
+            
             # Determine model output path based on aggregation level
             base_model_path = model_out_path
             if aggregation_level == "category" and filter_value:
@@ -2230,36 +2236,3 @@ if st.session_state.forecast_data is not None and st.session_state.forecast_csv_
         import traceback
         st.code(traceback.format_exc())
     
-    # PDF отчет (только для продвинутого режима)
-    if ui_mode == "advanced":
-        st.subheader("📥 Скачать PDF отчет")
-        
-        # Button to generate PDF
-        if st.button("📥 Сгенерировать PDF отчет", help="Генерирует PDF отчет с визуализацией прогноза и статистикой"):
-            try:
-                params = {"path": st.session_state.forecast_csv_path}
-                with st.spinner("Генерация PDF отчета..."):
-                    response = requests.get(f"{FASTAPI_URL}/forecast/download", params=params, timeout=120)
-                
-                if response.status_code == 200:
-                    st.session_state.pdf_data = response.content
-                    st.session_state.pdf_filename = "forecast_report.pdf"
-                    st.success("✅ PDF отчет сгенерирован! Нажмите кнопку скачивания ниже.")
-                else:
-                    st.error(f"❌ Ошибка генерации PDF: {response.text}")
-                    st.session_state.pdf_data = None
-                    st.session_state.pdf_filename = None
-            except Exception as e:
-                st.error(f"❌ Ошибка при генерации PDF: {str(e)}")
-                st.session_state.pdf_data = None
-                st.session_state.pdf_filename = None
-        
-        # Show download button if PDF data is available
-        if st.session_state.pdf_data is not None:
-            st.download_button(
-                label="💾 Скачать PDF",
-                data=st.session_state.pdf_data,
-                file_name=st.session_state.pdf_filename,
-                mime="application/pdf",
-                key='download_pdf'
-            )

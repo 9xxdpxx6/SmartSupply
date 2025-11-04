@@ -9,7 +9,6 @@ from app.preprocessing import parse_and_process
 from app.train import train_prophet
 from app.predict import predict_prophet, save_forecast_csv
 from app.evaluation import rolling_cross_validation_prophet
-from app.utils import export_report_pdf
 from app.diagnostics import diagnose_model, save_diagnostics
 from app.category_forecast import distribute_shop_forecast_to_categories, get_category_forecast_by_name
 import pandas as pd
@@ -431,119 +430,6 @@ async def evaluate_model(request: EvaluateRequest):
     except Exception as e:
         logger.error(f"Error during evaluation: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error during evaluation: {str(e)}")
-
-
-from fastapi.responses import FileResponse
-
-
-@app.get("/forecast/download")
-async def download_forecast_pdf(path: str = Query(..., description="Path to the forecast CSV file")):
-    """Download a forecast report as PDF."""
-    try:
-        # Validate that the path is for a CSV file
-        if not path.endswith(".csv"):
-            raise HTTPException(status_code=400, detail="Path must point to a CSV file")
-        
-        if not os.path.exists(path):
-            raise HTTPException(status_code=404, detail=f"Forecast CSV file not found: {path}")
-        
-        # Read the forecast CSV
-        df_forecast = pd.read_csv(path)
-        
-        # Validate required columns
-        required_cols = ['ds', 'yhat', 'yhat_lower', 'yhat_upper']
-        missing_cols = [col for col in required_cols if col not in df_forecast.columns]
-        if missing_cols:
-            raise HTTPException(status_code=400, detail=f"Forecast CSV missing required columns: {', '.join(missing_cols)}")
-        
-        # Try to read the history data (using the shop CSV if available)
-        # Try multiple possible paths for the shop CSV
-        base_dir = os.path.dirname(path)
-        possible_paths = [
-            path.replace("_category.csv", "_shop.csv").replace("forecast_shop.csv", "sales_data_shop.csv"),
-            os.path.join(base_dir, "sales_data_shop.csv"),
-            path.replace("forecast_shop.csv", "sales_data_shop.csv"),
-            path.replace("forecast_category.csv", "sales_data_category.csv").replace("_category.csv", "_shop.csv"),
-        ]
-        
-        df_history = pd.DataFrame(columns=['ds', 'y'])
-        shop_csv_path = None
-        
-        for possible_path in possible_paths:
-            if os.path.exists(possible_path):
-                try:
-                    df_history_temp = pd.read_csv(possible_path)
-                    # Validate that it has required columns
-                    if 'ds' in df_history_temp.columns and 'y' in df_history_temp.columns:
-                        df_history = df_history_temp
-                        shop_csv_path = possible_path
-                        logger.info(f"Found history CSV at: {shop_csv_path} ({len(df_history)} rows)")
-                        break
-                    else:
-                        logger.warning(f"History CSV at {possible_path} missing required columns (ds, y)")
-                except Exception as e:
-                    logger.warning(f"Error reading history CSV at {possible_path}: {str(e)}")
-                    continue
-        
-        if shop_csv_path is None:
-            # If history is not available, create an empty history DataFrame
-            logger.warning(f"History CSV not found in any of the attempted paths, using empty history")
-        
-        # Try to load metrics from JSON if available
-        # Metrics are saved next to the model, try standard location first
-        possible_metrics_paths = [
-            "models/prophet_model_metrics.json",  # Standard location
-            path.replace('.csv', '_metrics.json').replace('forecast', 'model'),
-            os.path.join(os.path.dirname(path), "prophet_model_metrics.json"),
-            os.path.join("models", os.path.basename(path).replace("forecast_shop.csv", "prophet_model_metrics.json")),
-        ]
-        
-        metrics = {
-            'mae': 'N/A',
-            'rmse': 'N/A',
-            'mape': 'N/A',
-            'log_transform': False,
-            'interval_width': 0.95
-        }
-        
-        metrics_found = False
-        for metrics_json_path in possible_metrics_paths:
-            if os.path.exists(metrics_json_path):
-                try:
-                    import json
-                    with open(metrics_json_path, 'r') as f:
-                        loaded_metrics = json.load(f)
-                        metrics.update(loaded_metrics)
-                    logger.info(f"Loaded metrics from: {metrics_json_path}")
-                    metrics_found = True
-                    break
-                except Exception as e:
-                    logger.warning(f"Error reading metrics from {metrics_json_path}: {str(e)}")
-                    continue
-        
-        if not metrics_found:
-            logger.warning("Metrics JSON not found, using default values (N/A)")
-        
-        # Generate a PDF path
-        pdf_path = path.replace('.csv', '_report.pdf')
-        
-        # Generate the PDF report
-        export_report_pdf(pdf_path, df_history, df_forecast, metrics)
-        
-        logger.info(f"PDF report generated: {pdf_path}")
-        
-        # Return the PDF file as a download
-        return FileResponse(
-            path=pdf_path,
-            media_type='application/pdf',
-            filename=os.path.basename(pdf_path)
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error during PDF generation: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error during PDF generation: {str(e)}")
 
 
 @app.post("/diagnose")

@@ -260,33 +260,73 @@ def train_prophet(
     
     df_prophet_train = df_train[prophet_cols].copy()
     
+    # АВТОМАТИЧЕСКОЕ ОПРЕДЕЛЕНИЕ ВОЛАТИЛЬНОСТИ ДАННЫХ (перед обработкой)
+    # Вычисляем коэффициент вариации (CV) для оценки волатильности
+    train_values = df_prophet_train['y'].values
+    train_values_nonzero = train_values[train_values > 0]
+    
+    if len(train_values_nonzero) > 1:
+        mean_val = np.mean(train_values_nonzero)
+        std_val = np.std(train_values_nonzero)
+        cv = (std_val / mean_val) if mean_val > 0 else 0.0  # Коэффициент вариации
+    else:
+        cv = 0.0
+        mean_val = 0.0
+        std_val = 0.0
+    
+    # Определяем уровень волатильности
+    is_highly_volatile = cv > 1.0  # CV > 1.0 означает очень высокую волатильность
+    is_moderately_volatile = cv > 0.5  # CV > 0.5 означает умеренную волатильность
+    
+    logger.info(f"📊 Анализ волатильности данных:")
+    logger.info(f"   Коэффициент вариации (CV): {cv:.2f}")
+    logger.info(f"   Среднее значение: {mean_val:.2f}")
+    logger.info(f"   Стандартное отклонение: {std_val:.2f}")
+    
+    if is_highly_volatile:
+        logger.warning(f"⚠️ ОБНАРУЖЕНА ВЫСОКАЯ ВОЛАТИЛЬНОСТЬ (CV={cv:.2f} > 1.0)")
+        logger.warning("   Применяем специальные настройки для волатильных данных...")
+    elif is_moderately_volatile:
+        logger.info(f"ℹ️ Обнаружена умеренная волатильность (CV={cv:.2f} > 0.5)")
+    
     # Для категорий/товаров: проверяем и обрабатываем много нулевых значений
     if filter_column is not None:
         zero_count = (df_prophet_train['y'] == 0).sum()
         zero_percent = (zero_count / len(df_prophet_train)) * 100 if len(df_prophet_train) > 0 else 0
         
         # Более агрессивная обработка для категорий с >30% нулей
+        # НО для волатильных данных сглаживание может ухудшить прогноз - применяем минимальное сглаживание
         if zero_percent > 30:
             logger.warning(f"⚠️ МНОГО НУЛЕВЫХ ЗНАЧЕНИЙ: {zero_percent:.1f}% ({zero_count} из {len(df_prophet_train)})")
             logger.warning("Это может сильно ухудшить прогноз. Prophet плохо работает с разреженными данными.")
             
             # Определяем, нужен ли агрессивный режим
             use_aggressive = zero_percent > 50
+            
+            # ДЛЯ ВОЛАТИЛЬНЫХ ДАННЫХ: минимизируем сглаживание
+            if is_highly_volatile:
+                logger.info("⚠️ ВОЛАТИЛЬНЫЕ ДАННЫЕ: минимизирую сглаживание для сохранения волатильности")
+                use_aggressive = False  # Не применяем агрессивное сглаживание для волатильных данных
+            
             if use_aggressive:
                 logger.warning("⚠️ ОЧЕНЬ РАЗРЕЖЕННЫЕ ДАННЫЕ! Применяем АГРЕССИВНУЮ обработку...")
             
             # Применяем улучшение качества данных (замена нулей на медианы, сглаживание)
-            try:
-                from app.preprocessing import _improve_data_quality
-                df_prophet_train = _improve_data_quality(df_prophet_train, aggressive=use_aggressive)
-                logger.info("Улучшение качества данных применено успешно")
-                
-                # Проверяем результат
-                zero_count_after = (df_prophet_train['y'] == 0).sum()
-                zero_percent_after = (zero_count_after / len(df_prophet_train)) * 100 if len(df_prophet_train) > 0 else 0
-                logger.info(f"После обработки: {zero_percent_after:.1f}% нулей (было {zero_percent:.1f}%)")
-            except Exception as e:
-                logger.warning(f"Не удалось применить улучшение качества данных: {str(e)}")
+            # Но только если данные не очень волатильны
+            if not is_highly_volatile or zero_percent > 70:
+                try:
+                    from app.preprocessing import _improve_data_quality
+                    df_prophet_train = _improve_data_quality(df_prophet_train, aggressive=use_aggressive)
+                    logger.info("Улучшение качества данных применено успешно")
+                    
+                    # Проверяем результат
+                    zero_count_after = (df_prophet_train['y'] == 0).sum()
+                    zero_percent_after = (zero_count_after / len(df_prophet_train)) * 100 if len(df_prophet_train) > 0 else 0
+                    logger.info(f"После обработки: {zero_percent_after:.1f}% нулей (было {zero_percent:.1f}%)")
+                except Exception as e:
+                    logger.warning(f"Не удалось применить улучшение качества данных: {str(e)}")
+            else:
+                logger.info("⚠️ Пропускаю сглаживание для волатильных данных - сохраняю оригинальную волатильность")
         
         if zero_percent > 70:
             logger.error(f"⚠️ КРИТИЧЕСКИ МНОГО НУЛЕЙ: {zero_percent:.1f}%!")
@@ -320,18 +360,44 @@ def train_prophet(
         is_weekly_aggregated = False
         avg_days_between = 1.0
     
+    # Для shop-level данных тоже применяем адаптивные настройки для волатильности
     # Для категорий/товаров применяем более агрессивные настройки по умолчанию
     # если пользователь не указал явно другие значения
     is_category_or_product = filter_column is not None
     if is_category_or_product:
         # Для категорий увеличиваем гибкость changepoints еще больше для улавливания волатильности
         # Используем только changepoints без seasonality для избежания циклических паттернов
-        if changepoint_prior_scale <= 0.01:
-            changepoint_prior_scale = 0.25  # Высокая гибкость для улавливания всплесков и падений
-            logger.info("Category/product data: increasing changepoint_prior_scale to 0.25 for better volatility capture")
-        elif changepoint_prior_scale < 0.2:
-            changepoint_prior_scale = max(changepoint_prior_scale * 2.0, 0.2)  # Увеличиваем если пользователь указал низкое значение
-            logger.info(f"Category/product data: increasing changepoint_prior_scale to {changepoint_prior_scale} for volatility")
+        
+        # АДАПТИВНАЯ НАСТРОЙКА ДЛЯ ВОЛАТИЛЬНЫХ ДАННЫХ
+        if is_highly_volatile:
+            # Для очень волатильных данных - максимальная гибкость
+            if changepoint_prior_scale <= 0.01:
+                changepoint_prior_scale = 0.5  # Очень высокая гибкость для волатильных данных
+                logger.info(f"🔥 ВЫСОКАЯ ВОЛАТИЛЬНОСТЬ: увеличиваю changepoint_prior_scale до 0.5 для лучшего улавливания всплесков")
+            elif changepoint_prior_scale < 0.3:
+                changepoint_prior_scale = max(changepoint_prior_scale * 3.0, 0.3)
+                logger.info(f"🔥 ВОЛАТИЛЬНОСТЬ: увеличиваю changepoint_prior_scale до {changepoint_prior_scale}")
+            
+            # Для волатильных данных используем multiplicative режим если он не был явно указан
+            if seasonality_mode == 'additive' and not auto_tune:
+                logger.info("💡 Рекомендация: для волатильных данных лучше использовать multiplicative режим")
+                # Не меняем автоматически, только предупреждаем
+        elif is_moderately_volatile:
+            # Для умеренно волатильных данных - средняя гибкость
+            if changepoint_prior_scale <= 0.01:
+                changepoint_prior_scale = 0.3
+                logger.info(f"📈 Умеренная волатильность: увеличиваю changepoint_prior_scale до 0.3")
+            elif changepoint_prior_scale < 0.2:
+                changepoint_prior_scale = max(changepoint_prior_scale * 2.0, 0.2)
+                logger.info(f"📈 Умеренная волатильность: увеличиваю changepoint_prior_scale до {changepoint_prior_scale}")
+        else:
+            # Для стабильных данных - стандартные настройки
+            if changepoint_prior_scale <= 0.01:
+                changepoint_prior_scale = 0.25  # Высокая гибкость для улавливания всплесков и падений
+                logger.info("Category/product data: increasing changepoint_prior_scale to 0.25 for better volatility capture")
+            elif changepoint_prior_scale < 0.2:
+                changepoint_prior_scale = max(changepoint_prior_scale * 2.0, 0.2)  # Увеличиваем если пользователь указал низкое значение
+                logger.info(f"Category/product data: increasing changepoint_prior_scale to {changepoint_prior_scale} for volatility")
         
         # Для категорий полностью отключаем seasonality - используем только changepoints
         seasonality_prior_scale = 0.1  # Минимальное значение (сезонность будет отключена)
@@ -341,6 +407,20 @@ def train_prophet(
         if interval_width >= 0.95:
             interval_width = 0.80  # Более узкий интервал для категорий
             logger.info("Category/product data: reducing interval_width to 0.80 for narrower confidence interval")
+    else:
+        # ДЛЯ SHOP-LEVEL ДАННЫХ: также применяем адаптивные настройки для волатильности
+        if is_highly_volatile:
+            # Для волатильных shop-level данных увеличиваем changepoint_prior_scale
+            if changepoint_prior_scale <= 0.01:
+                changepoint_prior_scale = 0.1  # Умеренная гибкость для shop-level
+                logger.info(f"🔥 ВОЛАТИЛЬНЫЕ SHOP-LEVEL ДАННЫЕ: увеличиваю changepoint_prior_scale до 0.1")
+            elif changepoint_prior_scale < 0.05:
+                changepoint_prior_scale = max(changepoint_prior_scale * 2.0, 0.05)
+                logger.info(f"🔥 ВОЛАТИЛЬНОСТЬ: увеличиваю changepoint_prior_scale до {changepoint_prior_scale}")
+        elif is_moderately_volatile:
+            if changepoint_prior_scale <= 0.01:
+                changepoint_prior_scale = 0.05
+                logger.info(f"📈 Умеренная волатильность shop-level: увеличиваю changepoint_prior_scale до 0.05")
     
     if not use_yearly and days_span < 730:
         logger.warning(f"Data span ({days_span} days) < 730 days. Disabling yearly_seasonality for stability.")
